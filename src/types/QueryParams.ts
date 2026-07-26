@@ -23,3 +23,10 @@ export interface AggQueryPar extends QueryParams {
     bucket: BucketSize;
     group_by?: 'service'|'level';
 }
+
+export const BUCKET_INTERVALS: Record<string, string> = {
+  '1m': '1 minute',
+  '5m': '5 minutes',
+  '1h': '1 hour',
+  '1d': '1 day',
+};

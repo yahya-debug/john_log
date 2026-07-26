@@ -13,12 +13,22 @@ export function validateQueryParams(req: Request, res: Response, next: NextFunct
         }
     }
 
-    console.log("level" in query, !isLevel(query.level))
     if ("level" in query && !isLevel(query.level))
         return res.status(400).json({ error: "unknown level" })
 
     if ("limit" in query && isNaN(Number(query.limit)))
         return res.status(400).json({ error: "limit should be number" })
+
+    next();
+}
+
+export function validateAggregateParams(req: Request, res: Response, next: NextFunction) {
+    const { query } = req;
+    if (!query.since || !query.until)
+        return res.status(400).json({ error: "for logs/aggregate, since & until timestamps are required " });
+
+    if ("level" in query && !isLevel(query.level))
+        return res.status(400).json({ error: "unknown level" });
 
     next();
 }
