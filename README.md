@@ -42,7 +42,6 @@ Logs flow: `POST /logs` → validated → published to RabbitMQ → worker batch
    ```bash
    npm run db:migrate
    ```
-   > ⚠️ The current migration (`src/db/migrations/0000_colossal_sharon_ventura.sql`) has a quoting bug: `PARTITION BY RANGE ('timestamp')` and `PRIMARY KEY ('id', 'timestamp')` use single-quoted string literals instead of column identifiers, which Postgres will reject. This needs to be fixed (unquoted/double-quoted `timestamp`/`id`) before the migration will apply cleanly.
 4. After changing `src/db/schema.ts`, regenerate a migration with:
    ```bash
    npm run db:generate

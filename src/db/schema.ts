@@ -7,6 +7,6 @@ export const logs = pgTable('logs', {
     level: text('level').notNull(),
     service: text('service').notNull(),
     message: text('message').notNull(),
-    attr: jsonb('attributes').notNull().default({})
+    attributes: jsonb('attributes').notNull().default({})
 }, (table) => [check('level_check', sql`${table.level} IN ('debug', 'info', 'warn', 'error')`)]);
 
