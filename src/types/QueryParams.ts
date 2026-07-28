@@ -30,3 +30,7 @@ export const BUCKET_INTERVALS: Record<string, string> = {
   '1h': '1 hour',
   '1d': '1 day',
 };
+
+export function isBucketSize(size: string): size is BucketSize {
+    return typeof size === 'string' && bucket_size.includes(size as any);
+}
