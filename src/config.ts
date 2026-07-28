@@ -2,6 +2,7 @@ import { config } from 'dotenv';
 config();
 
 export const Env = {
+    db_name: process.env.POSTGRES_DB,
     db_url: process.env.DB_CONNECTION,
     PORT: process.env.PORT,
     RETENTION_DAYS: Number(process.env.RETENTION_DAYS) || 30,

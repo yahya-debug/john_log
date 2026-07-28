@@ -23,8 +23,12 @@ export function App() {
 
     app.use(malformedJSON);
 
-    runMigration();
-    retain().catch(err => console.error(`retention job failed: ${err}`));
+    // retain() partitions the `logs` table, so it can't run until migrations
+    // have created it — chain it onto migration completion instead of firing
+    // both off in parallel.
+    runMigration()
+        .then(() => retain())
+        .catch(err => console.error(`retention job failed: ${err}`));
     retentionJob();
     return app;
 }
