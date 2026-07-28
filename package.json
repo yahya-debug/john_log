@@ -12,7 +12,9 @@
         "db:generate": "npx drizzle-kit generate",
         "db:migrate": "npx drizzle-kit migrate",
         "build": "npx tsc",
-        "start": "tsx ./src/index.ts"
+        "start": "tsx ./src/index.ts",
+        "loadtest:seed": "tsx loadtest/seed.ts",
+        "loadtest:mixed": "tsx loadtest/mixed.ts"
     },
     "keywords": [],
     "author": "",
