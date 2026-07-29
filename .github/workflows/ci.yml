@@ -40,7 +40,7 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npm run build
-      - run: npm run db:migrate
+      - run: npm run db:migrate:app
       - run: npm test
 
   docker-smoke-test:

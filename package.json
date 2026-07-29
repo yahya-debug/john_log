@@ -11,6 +11,7 @@
         "typecheck": "tsc --noEmit",
         "db:generate": "npx drizzle-kit generate",
         "db:migrate": "npx drizzle-kit migrate",
+        "db:migrate:app": "tsx scripts/migrate.ts",
         "build": "npx tsc",
         "start": "tsx ./src/index.ts",
         "loadtest:seed": "tsx loadtest/seed.ts",
