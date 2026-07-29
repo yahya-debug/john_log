@@ -27,6 +27,7 @@ jobs:
           --health-retries 10
     env:
       DB_CONNECTION: postgres://postgres:postgres@localhost:5432/john_log
+      POSTGRES_DB: john_log
       RETENTION_DAYS: '30'
       PARTITION_LOOKAHEAD_DAYS: '7'
       RETENTION_CRON: '10 0 * * *'
