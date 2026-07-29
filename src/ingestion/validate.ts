@@ -1,3 +1,4 @@
+import { Env } from "../config.js";
 import { isLevel, Log, premitives, RejectedLog, ValidatedLog } from "../types/log.js";
 
 // types of validateEntry outputs
@@ -9,8 +10,19 @@ type RejectionRes = {
     valid: boolean;
     reason: string;
 }
+type ValidateOpts = {
+    // lets the admin backfill endpoint accept timestamps older than the
+    // retention window — normal ingestion never does
+    allowStale?: boolean;
+}
 
-export function validateEntry(entry: any): ValidationRes | RejectionRes {
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function isStale(timestamp: string | Date): boolean {
+    return new Date(timestamp).getTime() < Date.now() - Env.RETENTION_DAYS * DAY_MS;
+}
+
+export function validateEntry(entry: any, opts: ValidateOpts = {}): ValidationRes | RejectionRes {
     if (typeof entry != "object" || entry === null)
         return { valid: false, reason: "entry must be an object" }
 
@@ -22,6 +34,8 @@ export function validateEntry(entry: any): ValidationRes | RejectionRes {
         return { valid: false, reason: "invalid timestamp" };
     if (parsedTime.getTime() > Date.now() + 5*60*1000)
         return { valid: false, reason: "timestamp is more than 5 minutes in the future" };
+    if (!opts.allowStale && isStale(timestamp))
+        return { valid: false, reason: `timestamp is older than the retention window (${Env.RETENTION_DAYS} days)` };
 
     if (!isLevel(level))
         return { valid: false, reason: `Invalid level: ${level}` };
@@ -58,7 +72,7 @@ export function validateEntry(entry: any): ValidationRes | RejectionRes {
     }
 }
 
-export function validateBatch(logs: unknown[]): {
+export function validateBatch(logs: unknown[], opts: ValidateOpts = {}): {
     accepted: ValidatedLog[];
     rejected: RejectedLog[];
 } {
@@ -66,7 +80,7 @@ export function validateBatch(logs: unknown[]): {
     const rejected: RejectedLog[] = [];
 
     logs.forEach((log, index) => {
-        const res = validateEntry(log);
+        const res = validateEntry(log, opts);
 
         if (res.valid)
             accepted.push((res as ValidationRes).data);

@@ -47,20 +47,34 @@ async function main() {
     let nextBatch = 0;
     const start = Date.now();
 
+    // workers will take a batch one-by-one
+    // until all batches are pushed
     async function worker() {
         while (nextBatch < batches) {
             const mine = nextBatch++;
             const size = mine === batches - 1 ? TOTAL_ROWS - mine * BATCH_SIZE : BATCH_SIZE;
             await db.insert(logs).values(Array.from({ length: size }, randomRow));
-
+            
             if (mine % 20 === 0) {
+                // count of insearted un
                 const inserted = Math.min((mine + 1) * BATCH_SIZE, TOTAL_ROWS);
                 const elapsed = (Date.now() - start) / 1000;
                 console.log(`${inserted}/${TOTAL_ROWS} rows (${Math.round(inserted / elapsed)}/s)`);
             }
         }
     }
+    
+    // Run all workers concurrently.
+    // every worker will take place in the array and start working
+    // because they are ASYNC it wont wait until the single worker is done
+    // works faster, since the batches are distributed on many workers (the length: CONCURRENCY)
 
+    // EQUIVALENT:
+    // const workerPromises = [];
+    // for (let i = 0; i < CONCURRENCY; i++) {
+    //     workerPromises.push(worker()); (Starts instantly, does not wait)
+    // }
+    // await Promise.all(workerPromises);
     await Promise.all(Array.from({ length: CONCURRENCY }, worker));
     console.log(`done: ${TOTAL_ROWS} rows in ${((Date.now() - start) / 1000).toFixed(1)}s`);
     process.exit(0);

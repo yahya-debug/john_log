@@ -200,3 +200,20 @@ describe("GET /logs/aggregate", () => {
         expect(res.status).toBe(400);
     });
 });
+
+describe("GET /admin/stats", () => {
+    it("200s with totals, partitions, time range, ingestion rate and retention config all present", async () => {
+        const res = await request(app).get("/admin/stats");
+
+        expect(res.status).toBe(200);
+        expect(res.body.totals.rows).toBeGreaterThan(0);
+        expect(res.body.totals.by_level).toBeTypeOf("object");
+        expect(res.body.totals.by_service).toBeTypeOf("object");
+        expect(Array.isArray(res.body.partitions)).toBe(true);
+        expect(res.body.partitions.map((p: any) => p.name)).toContain("logs_default");
+        expect(res.body.time_range.oldest).toBeTruthy();
+        expect(res.body.ingestion_rate.last_5m).toBeGreaterThanOrEqual(0);
+        expect(res.body.retention_config.retention_days).toBeGreaterThan(0);
+        expect(typeof res.body.database_size_bytes).toBe("number");
+    });
+});

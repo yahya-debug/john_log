@@ -81,18 +81,115 @@ export async function dropOldPartitions(retentionDays: number): Promise<string[]
   return dropped;
 }
 
-export async function moveToAppropriatePartition(): Promise<{ moved: number }> {
-    const moved = await db.execute(sql`
-        WITH moved_rows AS (
-            DELETE FROM logs_default
-            RETURNING id, timestamp, level, service, message, attributes
-        )
-        INSERT INTO logs logs (id, timestamp, level, service, message, attributes)
-        SELECT id, timestamp, level, service, message, attributes FROM moved_rows
-        RETURNING id;
-    `)
+/**
+ * Creates (if missing) the dated partition for `date` and moves any matching
+ * rows already sitting in logs_default into it.
+ *
+ * Postgres refuses to attach a new partition over a range logs_default
+ * already holds rows for (it validates the default's contents against every
+ * sibling partition's bounds — including a brand new one). Detaching
+ * logs_default first sidesteps that check entirely — there's briefly no
+ * default partition for anything to conflict with. But that same check
+ * applies again on the way back in: reattaching logs_default as DEFAULT
+ * re-validates it against every sibling, including the partition we just
+ * created — so the matching rows have to be moved out of logs_default
+ * *before* reattaching, not after, or the reattach itself fails with the
+ * same error. The move is scoped to just this one day's range, unlike the
+ * old version, so it's safe to run against a logs_default holding millions
+ * of unrelated rows.
+ *
+ * The whole detach→create→move→reattach sequence runs inside one
+ * transaction, gated by a transaction-scoped advisory lock: two calls for
+ * different dates (e.g. the daily cron and a manual admin backfill
+ * overlapping) can't both detach logs_default at once, and if anything in
+ * the middle fails, Postgres rolls the detach back too instead of leaving
+ * logs_default permanently orphaned.
+ */
+export async function backfillPartitionForDate(date: Date): Promise<{ partition: string; moved: number }> {
+    const name = partitionName(date);
+    const { from, to } = dayBounds(date);
 
-    return {
-        moved: moved.length
+    return await db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('logs_default_backfill'))`);
+
+        async function moveMatchingRows(): Promise<number> {
+            const moved = await tx.execute(sql`
+                WITH moved_rows AS (
+                    DELETE FROM logs_default
+                    WHERE timestamp >= ${from}::timestamptz AND timestamp < ${to}::timestamptz
+                    RETURNING id, timestamp, level, service, message, attributes
+                )
+                INSERT INTO logs (id, timestamp, level, service, message, attributes)
+                SELECT id, timestamp, level, service, message, attributes FROM moved_rows
+                RETURNING id
+            `);
+            return moved.length;
+        }
+
+        const existsRows = await tx.execute<{ exists: boolean }>(
+            sql`SELECT EXISTS (SELECT 1 FROM pg_class WHERE relname = ${name}) AS exists`
+        );
+        if (existsRows[0]!.exists) {
+            return { partition: name, moved: await moveMatchingRows() };
+        }
+
+        await tx.execute(sql`ALTER TABLE logs DETACH PARTITION logs_default`);
+        await tx.execute(sql`
+            CREATE TABLE ${sql.identifier(name)}
+            PARTITION OF logs FOR VALUES FROM (${sql.raw(`'${from}'`)}) TO (${sql.raw(`'${to}'`)})
+        `);
+        const moved = await moveMatchingRows();
+        await tx.execute(sql`ALTER TABLE logs ATTACH PARTITION logs_default DEFAULT`);
+        return { partition: name, moved };
+    });
+}
+
+/**
+ * A stray logs_default row for `date` is only worth backfilling into its own
+ * partition if it's still within the retention window — otherwise it would
+ * just get dropped again on the next dropOldPartitions run, so it's deleted
+ * outright instead.
+ */
+export async function reconcileDefaultDate(
+    date: Date,
+    retentionDays: number
+): Promise<{ action: "deleted" | "backfilled"; count: number }> {
+    const cutoff = new Date();
+    cutoff.setUTCDate(cutoff.getUTCDate() - retentionDays);
+
+    if (date < cutoff) {
+        const { from, to } = dayBounds(date);
+        const deleted = await db.execute(sql`
+            DELETE FROM logs_default
+            WHERE timestamp >= ${from}::timestamptz AND timestamp < ${to}::timestamptz
+            RETURNING id
+        `);
+        return { action: "deleted", count: deleted.length };
     }
+
+    const { moved } = await backfillPartitionForDate(date);
+    return { action: "backfilled", count: moved };
+}
+
+// Sweeps every distinct date currently sitting in logs_default and resolves
+// each one via reconcileDefaultDate — the routine housekeeping counterpart
+// to ensureFuturePartitions/dropOldPartitions.
+export async function reconcileDefaultPartition(
+    retentionDays: number
+): Promise<{ deleted: number; backfilled: string[] }> {
+    const rows = await db.execute<{ day: string }>(
+        sql`SELECT DISTINCT date_trunc('day', timestamp)::date AS day FROM logs_default`
+    );
+
+    let deleted = 0;
+    const backfilled: string[] = [];
+
+    for (const { day } of rows) {
+        const date = new Date(day);
+        const result = await reconcileDefaultDate(date, retentionDays);
+        if (result.action === "deleted") deleted += result.count;
+        else if (result.count > 0) backfilled.push(partitionName(date));
+    }
+
+    return { deleted, backfilled };
 }

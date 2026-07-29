@@ -2,6 +2,7 @@ import express, { type Express } from "express";
 import qs from "qs";
 import logsRouter from "./routes/logs.js";
 import aggregateRouter from "./routes/aggregate.js"
+import adminRouter from "./routes/admin.js"
 import { errorCatcher, malformedJSON } from "./middleware/errorHandlers.js";
 import { runMigration } from "../db/migrate.js";
 import { retain, retentionJob } from "../retention/job.js";
@@ -19,6 +20,7 @@ export function App() {
 
     app.use('/logs', logsRouter);
     app.use('/logs/aggregate', aggregateRouter);
+    app.use('/admin', adminRouter);
 
 
     app.use(malformedJSON);

@@ -2,7 +2,13 @@ import { describe, expect, it, afterAll } from "vitest";
 import { sql } from "drizzle-orm";
 import { db } from "../../../src/db/db.js";
 import { logs } from "../../../src/db/schema.js";
-import { dropOldPartitions, ensureFuturePartitions } from "../../../src/retention/partitions.js";
+import {
+    backfillPartitionForDate,
+    dropOldPartitions,
+    ensureFuturePartitions,
+    reconcileDefaultDate,
+    reconcileDefaultPartition,
+} from "../../../src/retention/partitions.js";
 import { retain } from "../../../src/retention/job.js";
 
 function dateOffset(days: number): Date {
@@ -99,53 +105,113 @@ describe("dropOldPartitions", () => {
     });
 });
 
-describe("moveToAppropriatePartition", () => {
+// Inserts directly into the logs_default child table, bypassing the
+// parent's partition routing — this is the only way to reproduce a stray
+// row for a date, whether or not that date already has a matching partition,
+// since inserting through `logs` itself would just route there directly.
+async function insertStrayRow(date: Date, service: string): Promise<string> {
+    const [row] = await db.execute<{ id: string }>(sql`
+        INSERT INTO logs_default (timestamp, level, service, message, attributes)
+        VALUES (${date.toISOString()}::timestamptz, 'info', ${service}, 'stray-row', '{}'::jsonb)
+        RETURNING id
+    `);
+    return row!.id;
+}
+
+async function tableOidOf(id: string): Promise<string> {
+    const [row] = await db.execute<{ part: string }>(
+        sql`SELECT tableoid::regclass::text AS part FROM logs WHERE id = ${id}`
+    );
+    return row!.part;
+}
+
+describe("backfillPartitionForDate", () => {
     const targetDate = dateOffset(45); // safely past PARTITION_LOOKAHEAD_DAYS, so it starts out unpartitioned
     const targetName = partitionName(targetDate);
+    const otherDate = dateOffset(46);
+    const otherName = partitionName(otherDate);
 
     afterAll(async () => {
         await dropPartitionIfExists(targetName);
+        await dropPartitionIfExists(otherName);
     });
 
-    // Postgres won't let you CREATE a partition over a date range that
-    // already has matching rows sitting in logs_default (it validates the
-    // default partition's contents against the new bounds) — so
-    // moveToAppropriatePartition can never legitimately fire in an "insert
-    // stray row, then create the partition" order; the CREATE itself is
-    // rejected first. Pin that down explicitly, since it constrains how
-    // (or whether) this function can ever be used from real ingestion.
-    it("Postgres refuses to create a partition over a date range logs_default already has rows for", async () => {
-        await db
-            .insert(logs)
-            .values({ timestamp: targetDate, level: "info", service: "__itest_move__", message: "move-me", attributes: {} });
+    it("creates the partition and moves a stray logs_default row into it", async () => {
+        const id = await insertStrayRow(targetDate, "__itest_backfill__");
+        expect(await tableOidOf(id)).toBe("logs_default");
 
-        let error: any;
-        try {
-            await createPartitionForDate(targetDate);
-        } catch (e) {
-            error = e;
+        const result = await backfillPartitionForDate(targetDate);
+        expect(result).toEqual({ partition: targetName, moved: 1 });
+        expect(await tableOidOf(id)).toBe(targetName);
+    });
+
+    it("is idempotent — calling it again for the same date just moves nothing", async () => {
+        await expect(backfillPartitionForDate(targetDate)).resolves.toEqual({ partition: targetName, moved: 0 });
+    });
+
+    it("only touches the requested date, leaving other logs_default rows alone", async () => {
+        const untouchedId = await insertStrayRow(otherDate, "__itest_backfill__");
+
+        await backfillPartitionForDate(targetDate); // targetDate again, not otherDate
+
+        expect(await tableOidOf(untouchedId)).toBe("logs_default");
+        await db.delete(logs).where(sql`id = ${untouchedId}`);
+    });
+});
+
+describe("reconcileDefaultDate", () => {
+    const withinWindowDate = dateOffset(47);
+    const withinWindowName = partitionName(withinWindowDate);
+    const pastRetentionDate = dateOffset(-90);
+
+    afterAll(() => dropPartitionIfExists(withinWindowName));
+
+    it("backfills a date that's still within the retention window", async () => {
+        await insertStrayRow(withinWindowDate, "__itest_reconcile__");
+        const result = await reconcileDefaultDate(withinWindowDate, 30);
+        expect(result).toEqual({ action: "backfilled", count: 1 });
+
+        const partitions = await listPartitions();
+        expect(partitions).toContain(withinWindowName);
+    });
+
+    it("deletes (rather than backfills) a date that's already past the retention window", async () => {
+        const id = await insertStrayRow(pastRetentionDate, "__itest_reconcile__");
+        const result = await reconcileDefaultDate(pastRetentionDate, 30);
+        expect(result).toEqual({ action: "deleted", count: 1 });
+
+        // gone entirely, not moved anywhere
+        const rows = await db.execute(sql`SELECT 1 FROM logs WHERE id = ${id}`);
+        expect(rows).toHaveLength(0);
+
+        const name = partitionName(pastRetentionDate);
+        expect(await listPartitions()).not.toContain(name);
+    });
+});
+
+describe("reconcileDefaultPartition", () => {
+    const freshDates = [dateOffset(48), dateOffset(49)];
+    const staleDate = dateOffset(-95);
+
+    afterAll(async () => {
+        for (const d of freshDates) await dropPartitionIfExists(partitionName(d));
+    });
+
+    it("sweeps every distinct logs_default date, backfilling fresh ones and deleting stale ones", async () => {
+        for (const d of freshDates) await insertStrayRow(d, "__itest_sweep__");
+        await insertStrayRow(staleDate, "__itest_sweep__");
+
+        const result = await reconcileDefaultPartition(30);
+
+        expect(result.deleted).toBeGreaterThanOrEqual(1);
+        for (const d of freshDates) {
+            expect(result.backfilled).toContain(partitionName(d));
         }
-        expect(error).toBeDefined();
-        expect(String(error?.cause?.message ?? error?.message)).toMatch(/default partition/i);
-
-        await db.delete(logs).where(sql`service = '__itest_move__'`);
     });
-
-    // NOTE: we deliberately don't exercise the "happy path" (insert a stray
-    // logs_default row, call moveToAppropriatePartition(), assert it moved)
-    // here. The real function has no scoping — it's `DELETE FROM logs_default
-    // RETURNING ... INSERT INTO logs ...` over the *entire* table — and this
-    // database's logs_default currently holds ~1.7M rows (from loadtest
-    // seeding: seed dates only span the past week, but partitions only ever
-    // get created from "today" forward, so most seeded history has nowhere
-    // else to live). Actually calling it here would rewrite all of that on
-    // every test run. If this function is ever wired up for real use, it
-    // needs a date/batch-scoped signature before it's safe to call at all,
-    // let alone test against a populated table.
 });
 
 describe("retain", () => {
-    it("runs the full ensure+drop cycle without throwing, using real config", async () => {
+    it("runs the full ensure+drop+reconcile cycle without throwing, using real config", async () => {
         await expect(retain()).resolves.toBeUndefined();
     });
 });

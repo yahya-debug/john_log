@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { validateEntry, validateBatch } from "../../../src/ingestion/validate.js";
+import { validateEntry, validateBatch, isStale } from "../../../src/ingestion/validate.js";
+import { Env } from "../../../src/config.js";
+
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 describe("validateEntry", () => {
     it("accepts a well-formed entry and normalizes attribute values to strings", () => {
@@ -107,6 +110,51 @@ describe("validateEntry", () => {
         });
         expect(res.valid).toBe(false);
     });
+
+    it("rejects a timestamp older than the retention window", () => {
+        const stale = new Date(Date.now() - (Env.RETENTION_DAYS + 1) * DAY_MS).toISOString();
+        const res = validateEntry({ timestamp: stale, level: "info", service: "a", message: "m" });
+        expect(res.valid).toBe(false);
+        expect((res as any).reason).toMatch(/retention window/);
+    });
+
+    it("accepts a timestamp just within the retention window", () => {
+        const fresh = new Date(Date.now() - (Env.RETENTION_DAYS - 1) * DAY_MS).toISOString();
+        const res = validateEntry({ timestamp: fresh, level: "info", service: "a", message: "m" });
+        expect(res.valid).toBe(true);
+    });
+
+    it("accepts a stale timestamp when allowStale is set (admin backfill path)", () => {
+        const stale = new Date(Date.now() - (Env.RETENTION_DAYS + 10) * DAY_MS).toISOString();
+        const res = validateEntry({ timestamp: stale, level: "info", service: "a", message: "m" }, { allowStale: true });
+        expect(res.valid).toBe(true);
+    });
+
+    it("still rejects a future timestamp even with allowStale set", () => {
+        const future = new Date(Date.now() + 6 * 60 * 1000).toISOString();
+        const res = validateEntry({ timestamp: future, level: "info", service: "a", message: "m" }, { allowStale: true });
+        expect(res.valid).toBe(false);
+        expect((res as any).reason).toMatch(/future/);
+    });
+});
+
+describe("isStale", () => {
+    it("is false for a timestamp well within the retention window", () => {
+        expect(isStale(new Date(Date.now() - 5 * DAY_MS))).toBe(false);
+    });
+
+    it("is true for a timestamp older than the retention window", () => {
+        expect(isStale(new Date(Date.now() - (Env.RETENTION_DAYS + 1) * DAY_MS))).toBe(true);
+    });
+
+    it("is false for the current moment", () => {
+        expect(isStale(new Date())).toBe(false);
+    });
+
+    it("accepts an ISO string the same way it accepts a Date", () => {
+        const iso = new Date(Date.now() - (Env.RETENTION_DAYS + 1) * DAY_MS).toISOString();
+        expect(isStale(iso)).toBe(true);
+    });
 });
 
 describe("validateBatch", () => {
@@ -123,6 +171,19 @@ describe("validateBatch", () => {
 
     it("returns empty accepted/rejected for an empty batch", () => {
         expect(validateBatch([])).toEqual({ accepted: [], rejected: [] });
+    });
+
+    it("rejects a stale entry by default, but accepts it when allowStale is passed through", () => {
+        const stale = new Date(Date.now() - (Env.RETENTION_DAYS + 1) * DAY_MS).toISOString();
+        const entry = { timestamp: stale, level: "info", service: "a", message: "old" };
+
+        const normal = validateBatch([entry]);
+        expect(normal.accepted).toHaveLength(0);
+        expect(normal.rejected[0]?.reason).toMatch(/retention window/);
+
+        const backfill = validateBatch([entry], { allowStale: true });
+        expect(backfill.accepted).toHaveLength(1);
+        expect(backfill.rejected).toHaveLength(0);
     });
 
     it("never lets one bad entry drop the whole batch", () => {

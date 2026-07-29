@@ -29,7 +29,6 @@ services:
       RETENTION_DAYS: ${RETENTION_DAYS}
       PARTITION_LOOKAHEAD_DAYS: ${PARTITION_LOOKAHEAD_DAYS}
       RETENTION_CRON: ${RETENTION_CRON}
-      RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672
     depends_on:
       postgres:
         condition: service_healthy

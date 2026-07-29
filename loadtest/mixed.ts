@@ -87,6 +87,7 @@ async function runIngest(): Promise<{ samples: Sample[]; acceptedLogs: number }>
     const start = performance.now();
 
     for (let i = 0; i < totalBatches; i++) {
+        // we wait because it will be tested against 500/s logs ingested
         const targetTime = i * intervalMs;
         const wait = targetTime - (performance.now() - start);
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
@@ -97,9 +98,10 @@ async function runIngest(): Promise<{ samples: Sample[]; acceptedLogs: number }>
                 samples.push({ ms: s.ms, ok: s.ok });
                 acceptedLogs += s.accepted;
             })
-        );
+        ); // without await so they are pushed instantly
     }
 
+    // run the post requests concurrently
     await Promise.all(inFlight);
     return { samples, acceptedLogs };
 }
