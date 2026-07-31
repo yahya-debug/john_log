@@ -17,11 +17,6 @@ spec:
     spec:
       containers:
         - name: app
-          # No image has actually been pushed to this path yet — the CD
-          # workflow (or Stage 7's manual first build/push) creates it, then
-          # every deploy overwrites this via `kubectl set image`. Applying
-          # this Deployment before that first push will sit in
-          # ImagePullBackOff, which is expected.
           image: us-central1-docker.pkg.dev/john-log/john-log/app:latest
           ports:
             - containerPort: 8080
