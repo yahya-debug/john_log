@@ -98,6 +98,75 @@ to reinitialize from the current `.env`.
 Other scripts: `npm run db:generate` (after schema changes), `npm run build` (`tsc`), `npm run typecheck`,
 `npm run lint`, `npm test` / `npm run test:unit` / `npm run test:integration`.
 
+### Deploying to GCP (GKE + Cloud SQL)
+
+Manifests live in `k8s/`. The app runs as a `Deployment` (`k8s/deployment.yaml`) with a
+[Cloud SQL Auth Proxy](https://github.com/GoogleCloudSQL/cloud-sql-proxy) sidecar in the same pod, so the app
+container always talks to Postgres over `127.0.0.1:5432` regardless of the Cloud SQL instance's real address —
+`DB_CONNECTION` (in `k8s/secret.example.yaml`) points there. No separate migration `Job` is needed: the app
+runs migrations on boot exactly like it does under `docker compose` (`src/http/app.ts` → `runMigration()`),
+so a rolling deploy just re-runs that same idempotent step in each new pod.
+
+**One-time GCP setup** (needs `gcloud` authenticated to your project):
+
+```bash
+PROJECT_ID=<your-project-id>
+REGION=us-central1
+
+gcloud config set project "$PROJECT_ID"
+gcloud services enable container.googleapis.com sqladmin.googleapis.com \
+  artifactregistry.googleapis.com sqlcomponent.googleapis.com
+
+# Artifact Registry repo for the app image
+gcloud artifacts repositories create john-log \
+  --repository-format=docker --location="$REGION"
+
+# GKE Autopilot — no node pools to manage, fastest path to a working cluster
+gcloud container clusters create-auto john-log-cluster --region "$REGION"
+
+# Cloud SQL Postgres instance + database
+gcloud sql instances create john-log-db \
+  --database-version=POSTGRES_16 --region="$REGION" --tier=db-f1-micro
+gcloud sql databases create john_log --instance=john-log-db
+gcloud sql users set-password postgres --instance=john-log-db --password=<db-password>
+
+# Service account the cloud-sql-proxy sidecar authenticates as
+gcloud iam service-accounts create john-log-cloudsql
+gcloud projects add-iam-policy-binding "$PROJECT_ID" \
+  --member="serviceAccount:john-log-cloudsql@${PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/cloudsql.client"
+gcloud iam service-accounts keys create k8s/cloudsql-sa-key.json \
+  --iam-account="john-log-cloudsql@${PROJECT_ID}.iam.gserviceaccount.com"
+```
+
+Then wire up the cluster (namespace/config first, secrets are never committed):
+
+```bash
+kubectl apply -f k8s/namespace.yaml
+kubectl apply -f k8s/configmap.yaml   # first fill in INSTANCE_CONNECTION_NAME from:
+                                       #   gcloud sql instances describe john-log-db --format='value(connectionName)'
+
+kubectl create secret generic cloudsql-sa-key \
+  --from-file=key.json=k8s/cloudsql-sa-key.json -n john-log
+
+cp k8s/secret.example.yaml k8s/secret.yaml   # fill in the real DB user/password, then:
+kubectl apply -f k8s/secret.yaml
+```
+
+**GitHub Actions secrets** (repo Settings → Secrets and variables → Actions) needed for `.github/workflows/cd.yml`:
+`GCP_PROJECT_ID`, and `GCP_SA_KEY` (a JSON key for a service account with `roles/container.developer` and
+`roles/artifactregistry.writer` — separate from the cloud-sql-proxy service account above). The `cd` workflow
+triggers on every successful `ci` run on `main`: it builds and pushes the image to Artifact Registry, applies
+the manifests, then rolls the `Deployment` to the new image tag.
+
+First deploy only, since `cd.yml` assumes the `Deployment` already exists to `set image` on:
+```bash
+kubectl apply -f k8s/deployment.yaml   # uses the placeholder image, just to create the object
+kubectl apply -f k8s/service.yaml
+```
+
+`kubectl get service john-log-service -n john-log` once the `LoadBalancer` has an external IP assigned.
+
 ## API
 
 ### `GET /health`

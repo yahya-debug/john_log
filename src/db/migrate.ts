@@ -18,6 +18,17 @@ export async function runMigration() {
     }
 }
 
+// Cheap, synchronous, no DB round-trip or disk read — just reads the flag
+// runMigration() already set. Safe to poll frequently (e.g. a k8s readiness
+// probe), unlike _isReady() below which re-runs the whole migration check.
+export function isMigrationReady(): boolean {
+    return isReady;
+}
+
+// Actively runs migrations and reports whether they succeeded. Used by the
+// CI/setup entrypoint (scripts/migrate.ts) and by tests that need to wait
+// out App()'s fire-and-forget migration — not by the HTTP /health route,
+// which should only ever read the cached state via isMigrationReady().
 export async function _isReady(): Promise<boolean> {
     await runMigration()
     return isReady;
