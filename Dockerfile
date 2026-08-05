@@ -21,4 +21,9 @@ COPY --from=build /app/dist ./dist
 # aren't part of dist/ — migrate.ts expects them alongside the compiled db/ output
 COPY --from=build /app/src/db/migrations ./dist/db/migrations
 EXPOSE 8080
-CMD ["node", "dist/index.js"]
+# Node auto-sizes its old-space heap ceiling from the cgroup memory limit,
+# leaving it almost exactly at 256M under the brief's app-container limit —
+# zero headroom for RSS outside the heap (buffers, native memory, thread
+# stacks), risking OOM kills / heavy GC thrashing under sustained load.
+# Cap it explicitly, leaving real headroom.
+CMD ["node", "--max-old-space-size=176", "dist/index.js"]
