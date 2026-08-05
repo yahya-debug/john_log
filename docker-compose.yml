@@ -1,37 +1,93 @@
 services:
   postgres:
     image: postgres:16
+    # The image's own defaults (shared_buffers=128MB, work_mem=4MB,
+    # effective_cache_size=4GB) are stock Postgres install defaults, not
+    # tuned to this container's actual 1GB memory limit — shared_buffers in
+    # particular is far too small for this table's working set, so most
+    # reads miss Postgres's own cache and hit disk (confirmed live via
+    # pg_stat_activity: aggregate queries waiting on IO/DataFileRead while
+    # a flush was waiting on LWLock/WALWrite). Sized against the real 1GB
+    # limit instead:
+    command:
+      - postgres
+      - -c
+      - shared_buffers=256MB      # ~25% of the container's real 1GB, stock guidance
+      - -c
+      - work_mem=16MB             # speeds up the aggregate endpoint's HashAggregate;
+                                   # 16MB × ~10 pooled connections stays well under 1GB
+                                   # combined with shared_buffers
+      - -c
+      - effective_cache_size=768MB # planner hint — was defaulting to 4GB, more than
+                                    # this container actually has
+      - -c
+      - synchronous_commit=off    # every write-buffer flush was blocking on a WAL fsync before
+                                   # returning "committed" — a fixed cost paid per transaction on
+                                   # this container's single CPU core. Off means Postgres still
+                                   # writes WAL and a hard crash (OS crash/kill -9, not a clean
+                                   # SIGTERM/SIGINT shutdown) can lose the last fraction of a
+                                   # second of already-200'd data — an acceptable trade here since
+                                   # the write buffer already accepts data loss on overflow/flush
+                                   # failure (src/ingestion/writeBuffer.ts).
+      - -c
+      - max_parallel_workers_per_gather=0 # this container has exactly 1 real CPU (deploy.resources
+                                   # below), so "parallel" workers for the aggregate query never run
+                                   # in parallel — they just add Gather/coordination overhead and
+                                   # compete with the write buffer's flush transactions for the same
+                                   # single core. Measured directly: with the default (2 workers),
+                                   # GET /logs/aggregate p95 while ingestion runs was 1134ms
+                                   # (live)/1142ms (historical), both over the 1s target; with
+                                   # parallel workers off, 306ms/618ms, both comfortably under it.
+                                   # Ingest p95 improved too (32ms->11ms) from the freed-up core.
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      # Defaults ($VAR:-default) so a plain `docker compose up`, with no .env at all,
+      # still boots — required by the brief's "zero configuration" contract. .env
+      # (or exported shell vars) still overrides these when present.
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-john_log}
     ports:
       - "5433:5432" # 33 because on my own machine postgres is working and using this port
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-john_log}"]
       interval: 5s
       timeout: 5s
       retries: 10
+    deploy:
+      resources:
+        limits:
+          cpus: "1"
+          memory: 1024M
 
   app:
     build: .
-    command: ["node", "dist/index.js"]
+    command: ["node", "--max-old-space-size=176", "dist/index.js"]
     ports:
       - "8080:8080"
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
-      DB_CONNECTION: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB} # use postgres as hostname (the name of service)
-      PORT: ${PORT}
-      RETENTION_DAYS: ${RETENTION_DAYS}
-      PARTITION_LOOKAHEAD_DAYS: ${PARTITION_LOOKAHEAD_DAYS}
-      RETENTION_CRON: ${RETENTION_CRON}
+      # Same zero-config defaults as the postgres service above, so these two
+      # services agree on credentials even when no .env is present at all.
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-john_log}
+      DB_CONNECTION: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-john_log} # use postgres as hostname (the name of service)
+      PORT: ${PORT:-8080}
+      RETENTION_DAYS: ${RETENTION_DAYS:-30}
+      PARTITION_LOOKAHEAD_DAYS: ${PARTITION_LOOKAHEAD_DAYS:-7}
+      RETENTION_CRON: ${RETENTION_CRON:-10 0 * * *}
+      # Unset by default => disabled (see src/config.ts) — optional backpressure for
+      # GET /logs/aggregate?q=..., off unless explicitly configured.
+      AGGREGATE_Q_MAX_CONCURRENT: ${AGGREGATE_Q_MAX_CONCURRENT:-}
     depends_on:
       postgres:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256M
 
 volumes:
   pgdata:
