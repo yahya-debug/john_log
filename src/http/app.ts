@@ -16,7 +16,9 @@ export function App() {
     app.set('query parser', (str: string) => qs.parse(str, { allowDots: true }));
 
     // middlewares
-    app.use(express.json());
+    // Default 100kb is too small for large log batches; nothing in the
+    // ingestion contract caps batch size.
+    app.use(express.json({ limit: '10mb' }));
 
     app.use('/logs', logsRouter);
     app.use('/logs/aggregate', aggregateRouter);

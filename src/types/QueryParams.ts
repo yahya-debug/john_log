@@ -14,6 +14,9 @@ export interface LogQueryPar extends QueryParams {
     cursor?: string;
 }
 
+export const DEFAULT_LIMIT = 100;
+export const MAX_LIMIT = 1000;
+
 const bucket_size = ['1m', '5m', '1h', '1d'] as const;
 export type BucketSize = typeof bucket_size[number];
 

@@ -1,5 +1,5 @@
-import { describe, expect, it, afterAll, beforeAll } from "vitest";
-import { aggregateLogs, insertLogs, queryLogs } from "../../../src/db/logs.js";
+import { describe, expect, it, afterAll, afterEach, beforeAll } from "vitest";
+import { aggregateFromRollup, aggregateLogs, deadLetterEntries, deleteDeadLetter, insertLogs, listDeadLetters, queryLogs, upsertHourlyCounts } from "../../../src/db/logs.js";
 import { combineConditions, commandCondition } from "../../../src/query/filters.js";
 import type { ValidatedLog } from "../../../src/types/log.js";
 import { uniqueService, deleteService } from "../helpers.js";
@@ -21,9 +21,17 @@ describe("insertLogs", () => {
     const service = uniqueService("insert");
     afterAll(() => deleteService(service));
 
-    it("inserts entries and returns the generated rows, including server-assigned ids", async () => {
-        const rows = await insertLogs([entry(service, { message: "insert-1" })]);
+    // insertLogs no longer returns the inserted rows (dropped .returning()
+    // to keep the hot POST /logs path cheap under the 0.5-CPU app limit),
+    // so these assert via queryLogs instead of the call's return value.
+    async function fetchByService(svc: string) {
+        return queryLogs(combineConditions(commandCondition({ service: svc })), 100);
+    }
 
+    it("inserts entries, generating a server-assigned id", async () => {
+        await insertLogs([entry(service, { message: "insert-1" })]);
+
+        const rows = await fetchByService(service);
         expect(rows).toHaveLength(1);
         expect(rows[0].id).toBeTruthy();
         expect(rows[0].service).toBe(service);
@@ -31,26 +39,35 @@ describe("insertLogs", () => {
     });
 
     it("inserts a whole batch in one call", async () => {
-        const rows = await insertLogs([
-            entry(service, { message: "batch-1" }),
-            entry(service, { message: "batch-2" }),
-            entry(service, { message: "batch-3" }),
+        const batchService = uniqueService("insert-batch");
+        await insertLogs([
+            entry(batchService, { message: "batch-1" }),
+            entry(batchService, { message: "batch-2" }),
+            entry(batchService, { message: "batch-3" }),
         ]);
+        const rows = await fetchByService(batchService);
         expect(rows).toHaveLength(3);
+        await deleteService(batchService);
     });
 
     it("stores attributes as provided", async () => {
-        const [row] = await insertLogs([
-            entry(service, { message: "attrs", attributes: { user_id: "42", region: "eu-west" } }),
+        const attrsService = uniqueService("insert-attrs");
+        await insertLogs([
+            entry(attrsService, { message: "attrs", attributes: { user_id: "42", region: "eu-west" } }),
         ]);
+        const [row] = await fetchByService(attrsService);
         expect(row.attributes).toEqual({ user_id: "42", region: "eu-west" });
+        await deleteService(attrsService);
     });
 
     it("defaults attributes to {} at the DB level when omitted entirely", async () => {
-        const [row] = await insertLogs([
-            { timestamp: now.toISOString(), level: "info", service, message: "no-attrs" } as ValidatedLog,
+        const noAttrsService = uniqueService("insert-no-attrs");
+        await insertLogs([
+            { timestamp: now.toISOString(), level: "info", service: noAttrsService, message: "no-attrs" } as ValidatedLog,
         ]);
+        const [row] = await fetchByService(noAttrsService);
         expect(row.attributes).toEqual({});
+        await deleteService(noAttrsService);
     });
 });
 
@@ -161,5 +178,133 @@ describe("aggregateLogs", () => {
         );
         const rows = await aggregateLogs(conditions, "1 minute", null);
         expect(rows).toHaveLength(0);
+    });
+});
+
+describe("upsertHourlyCounts / aggregateFromRollup", () => {
+    const service = uniqueService("rollup");
+    afterAll(() => deleteService(service));
+
+    const hour = new Date(now.getTime());
+    hour.setUTCMinutes(0, 0, 0);
+    const since = hour;
+    const until = new Date(hour.getTime() + 60 * 60 * 1000);
+
+    it("increments (not overwrites) count across repeated calls for the same hour/service/level", async () => {
+        await upsertHourlyCounts([
+            { timestamp: hour.toISOString(), level: "error", service, message: "m" },
+            { timestamp: hour.toISOString(), level: "error", service, message: "m" },
+        ]);
+        await upsertHourlyCounts([
+            { timestamp: new Date(hour.getTime() + 5000).toISOString(), level: "error", service, message: "m" },
+        ]);
+
+        const rows = await aggregateFromRollup({ service, since, until }, "1h", null);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].count).toBe(3);
+    });
+
+    it("matches aggregateLogs's result for the same data, filters, and bucket", async () => {
+        const rollupService = uniqueService("rollup-parity");
+        const entries: ValidatedLog[] = [
+            { timestamp: hour.toISOString(), level: "error", service: rollupService, message: "m1" },
+            { timestamp: new Date(hour.getTime() + 1000).toISOString(), level: "error", service: rollupService, message: "m2" },
+            { timestamp: new Date(hour.getTime() + 2000).toISOString(), level: "warn", service: rollupService, message: "m3" },
+        ];
+        await insertLogs(entries);
+        await upsertHourlyCounts(entries);
+
+        const liveRows = await aggregateLogs(
+            combineConditions(commandCondition({ service: rollupService, since, until })),
+            "1 hour",
+            "level"
+        );
+        const rollupRows = await aggregateFromRollup({ service: rollupService, since, until }, "1h", "level");
+
+        const byGroupLive = Object.fromEntries(liveRows.map((r) => [r.group, r.count]));
+        const byGroupRollup = Object.fromEntries(rollupRows.map((r) => [r.group, r.count]));
+        expect(byGroupRollup).toEqual(byGroupLive);
+        expect(byGroupRollup).toEqual({ error: 2, warn: 1 });
+
+        await deleteService(rollupService);
+    });
+
+    it("re-buckets to 1d by summing across the day's hours", async () => {
+        const dayService = uniqueService("rollup-1d");
+        const dayStart = new Date(hour.getTime());
+        dayStart.setUTCHours(0, 0, 0, 0);
+
+        await upsertHourlyCounts([
+            { timestamp: dayStart.toISOString(), level: "info", service: dayService, message: "m" },
+            { timestamp: new Date(dayStart.getTime() + 3 * 60 * 60 * 1000).toISOString(), level: "info", service: dayService, message: "m" },
+        ]);
+
+        const rows = await aggregateFromRollup(
+            { service: dayService, since: dayStart, until: new Date(dayStart.getTime() + 24 * 60 * 60 * 1000) },
+            "1d",
+            null
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0].count).toBe(2);
+
+        await deleteService(dayService);
+    });
+
+    it("filters by level", async () => {
+        const rows = await aggregateFromRollup({ service, level: "debug", since, until }, "1h", null);
+        expect(rows).toHaveLength(0);
+    });
+});
+
+describe("deadLetterEntries / listDeadLetters / deleteDeadLetter", () => {
+    const createdIds: string[] = [];
+    afterEach(async () => {
+        for (const id of createdIds.splice(0)) await deleteDeadLetter(id);
+    });
+
+    async function findByService(svc: string) {
+        const rows = await listDeadLetters(1000);
+        return rows.find((r) => r.entries.some((e) => e.service === svc));
+    }
+
+    it("stores entries with the given reason, retrievable via listDeadLetters", async () => {
+        const service = uniqueService("deadletter");
+        await deadLetterEntries([entry(service, { message: "dl-1" })], "simulated failure");
+
+        const row = await findByService(service);
+        expect(row).toBeTruthy();
+        expect(row!.reason).toBe("simulated failure");
+        expect(row!.entries).toEqual([expect.objectContaining({ service, message: "dl-1" })]);
+        createdIds.push(row!.id);
+    });
+
+    it("stores the whole batch as one row, not one row per entry", async () => {
+        const service = uniqueService("deadletter-batch");
+        await deadLetterEntries(
+            [entry(service, { message: "dl-a" }), entry(service, { message: "dl-b" })],
+            "simulated batch failure"
+        );
+
+        const row = await findByService(service);
+        expect(row!.entries).toHaveLength(2);
+        createdIds.push(row!.id);
+    });
+
+    it("is a no-op for an empty entries array", async () => {
+        const before = (await listDeadLetters(1000)).length;
+        await deadLetterEntries([], "should not be stored");
+        const after = (await listDeadLetters(1000)).length;
+        expect(after).toBe(before);
+    });
+
+    it("deleteDeadLetter removes the row", async () => {
+        const service = uniqueService("deadletter-delete");
+        await deadLetterEntries([entry(service)], "to be deleted");
+        const row = await findByService(service);
+        expect(row).toBeTruthy();
+
+        await deleteDeadLetter(row!.id);
+
+        expect(await findByService(service)).toBeUndefined();
     });
 });

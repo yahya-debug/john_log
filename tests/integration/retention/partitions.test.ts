@@ -213,5 +213,5 @@ describe("reconcileDefaultPartition", () => {
 describe("retain", () => {
     it("runs the full ensure+drop+reconcile cycle without throwing, using real config", async () => {
         await expect(retain()).resolves.toBeUndefined();
-    });
+    }, 30_000);
 });

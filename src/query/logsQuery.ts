@@ -1,13 +1,10 @@
 import { and, eq, lt, or, SQL } from "drizzle-orm";
 import { Log } from "../types/log.js";
-import { LogQueryPar } from "../types/QueryParams.js";
+import { DEFAULT_LIMIT, LogQueryPar, MAX_LIMIT } from "../types/QueryParams.js";
 import { decodeCursor, encodeCursor } from "./cursor.js";
 import { combineConditions, commandCondition } from "./filters.js";
 import { logs } from "../db/schema.js";
 import { queryLogs } from "../db/logs.js";
-
-const DEFAULT_LIMIT = 100;
-const MAX_LIMIT = 1000;
 
 export interface LogQueryRes {
     logs: Log[];

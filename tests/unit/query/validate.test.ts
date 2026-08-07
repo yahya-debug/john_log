@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { validateQueryParams, validateAggregateParams } from "../../../src/query/validate.js";
+import { encodeCursor } from "../../../src/query/cursor.js";
 import type { Request, Response } from "express";
 
 function mockReq(query: Record<string, unknown>): Request {
@@ -71,10 +72,38 @@ describe("validateQueryParams", () => {
         expect(res.json).toHaveBeenCalledWith({ error: "limit must be a positive integer" });
     });
 
-    it("accepts a limit above 1000 here — capping is runQuery's job, not validation's", () => {
+    it("400s on a limit above the 1000 max", () => {
+        const res = mockRes();
+        validateQueryParams(mockReq({ limit: "5000" }), res, vi.fn());
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(res.json).toHaveBeenCalledWith({ error: "limit must not exceed 1000" });
+    });
+
+    it("accepts a limit of exactly 1000", () => {
         const next = vi.fn();
-        validateQueryParams(mockReq({ limit: "5000" }), mockRes(), next);
+        validateQueryParams(mockReq({ limit: "1000" }), mockRes(), next);
         expect(next).toHaveBeenCalledOnce();
+    });
+
+    it("calls next() when cursor is a validly-encoded cursor", () => {
+        const next = vi.fn();
+        const cursor = encodeCursor({ timestamp: "2026-07-20T14:00:00Z", id: "abc-123" });
+        validateQueryParams(mockReq({ cursor }), mockRes(), next);
+        expect(next).toHaveBeenCalledOnce();
+    });
+
+    it.each([
+        "not-valid-base64!!!",
+        Buffer.from("not json", "utf-8").toString("base64"),
+        Buffer.from(JSON.stringify({ timestamp: "2026-07-20T14:00:00Z" }), "utf-8").toString("base64"), // missing id
+        Buffer.from(JSON.stringify({ id: "abc" }), "utf-8").toString("base64"), // missing timestamp
+        Buffer.from(JSON.stringify({ timestamp: "not-a-date", id: "abc" }), "utf-8").toString("base64"),
+        Buffer.from(JSON.stringify(null), "utf-8").toString("base64"),
+    ])("400s on an invalid or malformed cursor (%s)", (cursor) => {
+        const res = mockRes();
+        validateQueryParams(mockReq({ cursor }), res, vi.fn());
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(res.json).toHaveBeenCalledWith({ error: "invalid or malformed cursor" });
     });
 });
 

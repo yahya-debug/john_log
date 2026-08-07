@@ -78,6 +78,11 @@ export async function dropOldPartitions(retentionDays: number): Promise<string[]
     }
   }
 
+  // logs_hourly_counts (the GET /logs/aggregate rollup — see src/db/logs.ts) has no
+  // partitioning of its own, so it needs an explicit sweep alongside dropping the
+  // dated partitions above, or it would grow past the retention window forever.
+  await db.execute(sql`DELETE FROM logs_hourly_counts WHERE hour < ${cutoff.toISOString()}::timestamptz`);
+
   return dropped;
 }
 
@@ -110,6 +115,9 @@ export async function backfillPartitionForDate(date: Date): Promise<{ partition:
     const { from, to } = dayBounds(date);
 
     return await db.transaction(async (tx) => {
+        // Acquires a transaction-level advisory lock named 'logs_default_backfill'.
+        // If two HTTP requests attempt to backfill partitions simultaneously,
+        //  this forces them to queue sequentially. The lock automatically releases when the transaction finishes.
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext('logs_default_backfill'))`);
 
         async function moveMatchingRows(): Promise<number> {

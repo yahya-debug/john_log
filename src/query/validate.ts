@@ -1,6 +1,20 @@
 import { NextFunction, Request, Response } from "express";
 import { isLevel } from "../types/log.js";
-import { isBucketSize } from "../types/QueryParams.js";
+import { isBucketSize, MAX_LIMIT } from "../types/QueryParams.js";
+import { decodeCursor } from "./cursor.js";
+
+function isValidCursor(cursor: unknown): boolean {
+    if (typeof cursor !== 'string') return false;
+
+    try {
+        const decoded = decodeCursor(cursor);
+        return typeof decoded === 'object' && decoded !== null
+            && typeof decoded.id === 'string' && decoded.id.length > 0
+            && !isNaN(new Date(decoded.timestamp).getTime());
+    } catch {
+        return false;
+    }
+}
 
 function isValidGroupBy(group_by: unknown): boolean {
     return group_by === undefined || group_by === 'service' || group_by === 'level';
@@ -42,7 +56,12 @@ export function validateQueryParams(req: Request, res: Response, next: NextFunct
         const limit = Number(query.limit);
         if (isNaN(limit) || !Number.isInteger(limit) || limit <= 0)
             return res.status(400).json({ error: "limit must be a positive integer" })
+        if (limit > MAX_LIMIT)
+            return res.status(400).json({ error: `limit must not exceed ${MAX_LIMIT}` })
     }
+
+    if ("cursor" in query && !isValidCursor(query.cursor))
+        return res.status(400).json({ error: "invalid or malformed cursor" })
 
     next();
 }

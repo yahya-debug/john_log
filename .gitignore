@@ -3,3 +3,4 @@ node_modules
 tree.txt
 k8s/secret.yaml
 k8s/*-key.json
+docs

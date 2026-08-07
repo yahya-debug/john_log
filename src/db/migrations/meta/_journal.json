@@ -8,6 +8,27 @@
       "when": 1784914770907,
       "tag": "0000_colossal_sharon_ventura",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1785700000000,
+      "tag": "0001_drop_global_trigram_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1785757242670,
+      "tag": "0002_friendly_solo",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1785777891623,
+      "tag": "0003_large_iron_monger",
+      "breakpoints": true
     }
   ]
 }

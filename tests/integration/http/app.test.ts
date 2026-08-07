@@ -2,6 +2,9 @@ import { describe, expect, it, beforeAll, afterAll } from "vitest";
 import request from "supertest";
 import { App } from "../../../src/http/app.js";
 import { _isReady } from "../../../src/db/migrate.js";
+import { flushNow } from "../../../src/ingestion/writeBuffer.js";
+import { deadLetterEntries, deleteDeadLetter } from "../../../src/db/logs.js";
+import type { ValidatedLog } from "../../../src/types/log.js";
 import { uniqueService, deleteService } from "../helpers.js";
 
 const service = uniqueService("http-app");
@@ -49,6 +52,11 @@ describe("POST /logs -> GET /logs round trip", () => {
             { index: 2, reason: expect.stringMatching(/level/i) },
             { index: 3, reason: expect.stringMatching(/timestamp/i) },
         ]);
+
+        // POST /logs now only buffers accepted entries (src/ingestion/writeBuffer.ts)
+        // rather than inserting synchronously, so later tests in this describe
+        // block that query for this data need it flushed first.
+        await flushNow();
     });
 
     it("400s a batch that's entirely invalid, without inserting anything", async () => {
@@ -115,6 +123,7 @@ describe("cursor pagination", () => {
         }));
         const res = await request(app).post("/logs").send({ logs });
         expect(res.body.accepted).toBe(5);
+        await flushNow();
     });
 
     it("walks every page via next_cursor and eventually terminates with null, seeing every row exactly once", async () => {
@@ -160,6 +169,7 @@ describe("GET /logs/aggregate", () => {
                     { timestamp: new Date(bucketMinute.getTime() + 10000).toISOString(), level: "warn", service: service3, message: "c" },
                 ],
             });
+        await flushNow();
     });
 
     it("returns bucketed counts over the requested range", async () => {
@@ -215,5 +225,48 @@ describe("GET /admin/stats", () => {
         expect(res.body.ingestion_rate.last_5m).toBeGreaterThanOrEqual(0);
         expect(res.body.retention_config.retention_days).toBeGreaterThan(0);
         expect(typeof res.body.database_size_bytes).toBe("number");
+    });
+});
+
+describe("GET/POST /admin/dead-letter", () => {
+    it("lists a dead-lettered batch and replays it successfully, removing it from the queue", async () => {
+        const svc = uniqueService("dead-letter-replay");
+        const entry: ValidatedLog = { timestamp: new Date().toISOString(), level: "error", service: svc, message: "m", attributes: {} };
+        await deadLetterEntries([entry], "simulated failure for test");
+
+        const listed = await request(app).get("/admin/dead-letter");
+        expect(listed.status).toBe(200);
+        const row = listed.body.find((r: any) => r.entries.some((e: any) => e.service === svc));
+        expect(row).toBeTruthy();
+
+        const replayed = await request(app).post("/admin/dead-letter/replay");
+        expect(replayed.status).toBe(200);
+        expect(replayed.body.replayed).toBeGreaterThanOrEqual(1);
+
+        const listedAfter = await request(app).get("/admin/dead-letter");
+        expect(listedAfter.body.find((r: any) => r.id === row.id)).toBeUndefined();
+
+        const queried = await request(app).get("/logs").query({ service: svc });
+        expect(queried.body.logs).toHaveLength(1);
+
+        await deleteService(svc);
+    });
+
+    it("leaves a batch queued (not deleted) if replay fails again", async () => {
+        const svc = uniqueService("dead-letter-stillfail");
+        // level violates the `logs` table's CHECK constraint, so re-insertion via
+        // replay genuinely fails, the same way the original failure would have.
+        const badEntry = { timestamp: new Date().toISOString(), level: "not-a-real-level", service: svc, message: "m", attributes: {} } as unknown as ValidatedLog;
+        await deadLetterEntries([badEntry], "simulated failure for test");
+
+        const replayed = await request(app).post("/admin/dead-letter/replay");
+        expect(replayed.status).toBe(200);
+        expect(replayed.body.stillFailed).toBeGreaterThanOrEqual(1);
+
+        const listedAfter = await request(app).get("/admin/dead-letter");
+        const row = listedAfter.body.find((r: any) => r.entries.some((e: any) => e.service === svc));
+        expect(row).toBeTruthy();
+
+        await deleteDeadLetter(row.id);
     });
 });
