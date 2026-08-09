@@ -1,4 +1,4 @@
-import type { AggregateBucket, AggregateResponse, Level, LogsResponse, Stats } from "./types";
+import type { AggregateResponse, Level, LogsResponse, Stats } from "./types";
 
 export type LogsQuery = {
     service?: string;
@@ -81,3 +81,4 @@ export async function getStats(): Promise<Stats> {
 export function tailURL(filters: {service?: string, level?: Level}): string {
     return '/admin/logs/tail/' + buildQuery(filters);
 }
+
