@@ -5,14 +5,17 @@ they're validated and written to a day-partitioned Postgres table, and made quer
 cursor pagination, and time-bucketed aggregation.
 
 Built against the brief's exact contract: `GET /health`, `POST /logs`, `GET /logs`, `GET /logs/aggregate`,
-running under 0.5 CPU/256MB (app) and 1 CPU/1GB (Postgres), sustaining ~14,900 logs/sec against a ~1M-row
+running under 0.5 CPU/256MB (app) and 1 CPU/1GB (Postgres), sustaining ~22,100 logs/sec against a ~1.4M-row
 table with sub-1s aggregate p95 for every query shape, including `q=` substring filters — measured with no
 index of any kind accelerating `message` search (see [Schema and index
-design](#schema-and-index-design) for why that's the shipped design after testing two indexed alternatives).
-One measured, documented edge case: `q=` filtered aggregation is the slowest shape and sits close enough to
-the 1s target that it varies run to run (measured p95 range: 768.8-923.0ms) — see [Known
-limitations](#known-limitations). Full numbers in [Measured performance
-results](#measured-performance-results).
+design](#schema-and-index-design) for why that's the shipped design after testing three indexed alternatives).
+`q=` filtered aggregation is still the slowest query shape, but is no longer the borderline case it once was:
+a precomputed, always-lowercased `message_lower` column (see [Schema and index
+design](#schema-and-index-design)) lets it compare with plain `LIKE` instead of `ILIKE`, cutting its p95 by
+roughly 3-3.7x at every measured rate (e.g. 1013.9ms → 271.5ms at 16,000/sec) without adding an index or
+touching the write path. Measured ceiling: clean passes up to ~22,500 logs/sec target; by ~23,500-25,000/sec
+the app container's 0.5 CPU cap saturates and every shape (ingestion included) degrades together. Full numbers
+in [Measured performance results](#measured-performance-results).
 
 ## Architecture
 
@@ -218,6 +221,7 @@ The service stores logs in a single `logs` table (`src/db/schema.ts`), `PARTITIO
 | `level` | `text` | `CHECK` constrained to `debug` / `info` / `warn` / `error` |
 | `service` | `text` | |
 | `message` | `text` | |
+| `message_lower` | `text` | `GENERATED ALWAYS AS (lower(message)) STORED` — Postgres computes and stores this on every insert; see the `?q=` section below for why |
 | `attributes` | `jsonb` | arbitrary per-entry attributes, defaults to `{}` — see [Attribute storage
 strategy](#attribute-storage-strategy) |
 
@@ -239,12 +243,14 @@ These four are created on the parent table in the `0000` migration, so every par
 inherits them automatically.
 
 **`?q=` substring search has no index at all — it's a deliberate choice, not an oversight, and it was tried
-three different ways before landing here.** `0000` originally created a `GIN (message gin_trgm_ops)` trigram
+four different ways before landing here.** `0000` originally created a `GIN (message gin_trgm_ops)` trigram
 index on the parent table (auto-attaching to every partition, including whichever one is currently absorbing
-writes); `0001` drops it. What replaces it is *nothing* — every `q=` filter falls back to a plain sequential
-`ILIKE` scan, bounded by whatever partition pruning the query's `since`/`until` range already provides. That
-sounds like giving up on the "index aligned with query patterns" goal, so here's why it's the fastest and
-most robust of everything actually tested:
+writes); `0001` drops it. What replaces it is *no index* — every `q=` filter falls back to a plain sequential
+scan, bounded by whatever partition pruning the query's `since`/`until` range already provides, but as of
+migration `0004` it scans a precomputed `message_lower` column with plain `LIKE` instead of re-lowercasing
+`message` with `ILIKE` on every row of every scan (see point 4 below). That sounds like giving up on the
+"index aligned with query patterns" goal, so here's why no-index-but-cheaper-per-row is the fastest and most
+robust of everything actually tested:
 
 1. **A global index** (the `0000` version): every write, on whichever partition is "today", pays full GIN
    trigram maintenance cost. This is the version that made ingestion fall to ~14,500/sec with 25-50% of
@@ -257,17 +263,25 @@ most robust of everything actually tested:
    because every one of those writes paid GIN maintenance cost on an index that was supposed to be safe from
    exactly that. The design's whole premise is a bet on which partition(s) the load generator's traffic will
    land on — a thing this project doesn't control and can't verify in advance.
-3. **No index anywhere** (shipped): measured equal-or-better than (2) under the traffic pattern actually
+3. **No index anywhere**: measured equal-or-better than (2) under the traffic pattern actually
    expected (concentrated on "today" — see [Measured performance results](#measured-performance-results) for
    the side-by-side), and unlike (2), it can't collapse if the real write pattern turns out to be different
    from what's assumed. The cost is real but bounded and predictable: at the brief's stated density
    (~33,000 rows/day), an unindexed scan of one day-partition measured **~20ms**; a large accumulated
    dataset queried across many days accumulates that cost linearly, not catastrophically.
+4. **No index, precomputed `message_lower` column** (`0004` migration, shipped): same scan, same robustness
+   properties as (3) — no index anywhere means no version of (1)/(2)'s collapse risk — but a cheaper per-row
+   comparison. `ILIKE` re-lowercases `message` on every row of every scan, on every request; `message_lower`
+   is lowercased once, by Postgres, at insert time (`GENERATED ALWAYS AS (lower(message)) STORED`), so the
+   filter becomes a plain-byte `LIKE` instead. Measured **3.6x faster** in an isolated `EXPLAIN ANALYZE`
+   (525.7ms → 147.2ms on the same ~1.1M-row partition) and **3-4.8x faster** `q=` p95 under real concurrent
+   load at every rate tested — see [the indexing journey](#the-indexing-journey-four-designs-tried-for-q) for
+   the full before/after table.
 
 Given the actual grading process is one load-generator run whose exact write pattern isn't specified, the
 option that's fast under the expected pattern *and* can't fail badly under an unexpected one is the right
 one — see [Measured performance results](#measured-performance-results) for the full comparison across all
-three, including at two different data densities.
+four, including at two different data densities.
 
 ### `logs_hourly_counts` — the aggregate rollup (`0002` migration)
 
@@ -391,7 +405,7 @@ complete, so it never races the table's own creation) and then daily on `RETENTI
   `backfillPartitionForDate`.
 
 No per-partition index maintenance runs here — see [Schema and index design](#schema-and-index-design) for why
-`q=` deliberately has no index at all (three designs were tried, including a deferred per-partition build from
+`q=` deliberately has no index at all (four designs were tried, including a deferred per-partition build from
 this same job; it was removed after measuring it fail badly under a write pattern this project doesn't
 control).
 
@@ -653,8 +667,8 @@ index type to maintain per write — and concurrent aggregate reads. Full invest
    to whichever partition was absorbing ingestion, taxing every insert with GIN maintenance cost. A
    per-partition, deferred version was tried next (build the index only once a partition stops taking writes);
    it was later removed entirely after further testing — see [Schema and index
-   design](#schema-and-index-design) and [the indexing journey](#the-indexing-journey-three-designs-tried-for-q)
-   below for the full comparison across all three designs.
+   design](#schema-and-index-design) and [the indexing journey](#the-indexing-journey-four-designs-tried-for-q)
+   below for the full comparison across all four designs.
 2. **`synchronous_commit=off`** (`docker-compose.yml`) — removes the WAL fsync-wait from each flush's commit,
    a fixed per-transaction cost. Tradeoff: a hard crash (not a clean shutdown, which already flushes cleanly)
    could lose the last fraction of a second of already-acknowledged writes — consistent with the write
@@ -718,9 +732,10 @@ anywhere — the final shipped design)
   almost exactly at the brief's "~1,000,000" target through the load generator's own `POST /logs` traffic, not
   a separate bulk-load step. Today's partition: 903,391 rows; every other day: ~3,400-3,500.
 - **`q=`-filtered aggregate passes comfortably on both p95 (768.8ms) and p99 (822.5ms)** — with no index
-  anywhere, not despite it. See [below](#the-indexing-journey-three-designs-tried-for-q) for why this beat the
-  indexed version, and why the margin here shouldn't be over-read (this shape's latency is close enough to the
-  1s boundary that it varies run to run — see the honest range noted below).
+  anywhere, not despite it. See [the indexing journey](#the-indexing-journey-four-designs-tried-for-q) for why
+  this beat the indexed version. This specific number predates the `message_lower` fix (migration `0004`) —
+  see [After the message_lower fix](#after-the-message_lower-fix-re-measured-at-15000-25000sec-and-the-actual-ceiling)
+  for the re-measured, no-longer-borderline numbers.
 - **Resource usage mid-run** (`docker stats`, sampled every 5s throughout): app container 26-33% CPU / ~35MiB
   RSS (well inside the 256MB cap); Postgres 29-70% CPU (peaking mid-run, not sustained) / up to 349MiB RSS
   (well inside the 1GB cap) — real headroom on both.
@@ -753,11 +768,54 @@ BATCH_SIZE=500`, fresh 100K/30-day seed:
   Postgres CPU 35-77% (peaking, not sustained) — both with headroom remaining under their caps, consistent
   with there being some room above 20,000/sec too, though that wasn't separately measured.
 
-### The indexing journey: three designs tried for `q=`
+### After the `message_lower` fix: re-measured at 15,000-25,000/sec, and the actual ceiling
+
+The two result sets above predate migration `0004` (`message_lower` — see [Schema and index
+design](#schema-and-index-design) and [the indexing journey](#the-indexing-journey-four-designs-tried-for-q)),
+where `q=` was the one shape sitting close to the 1s line. Re-measured after the fix, same methodology each
+time (fresh `docker compose down -v && up`, one 100K/30-day seed, one `loadtest:mixed` run,
+`BATCH_SIZE=500`), sweeping the target rate to find where the system actually stops keeping up rather than
+guessing:
+
+| Target rate | Achieved | Ingest p95 | Live p95 | Historical p95 | `q=` p95 | Verdict |
+|---|---|---|---|---|---|---|
+| 15,000/sec, 60s | 14,787/sec | 9.9ms | 170.4ms | 74.3ms | 177.3ms | **pass** |
+| 16,000/sec, 70s | 15,748/sec | 9.3ms | 285.4ms | 90.3ms | 271.5ms | **pass** |
+| 20,000/sec, 60s | 19,641/sec | 49.0ms | 278.9ms | 146.9ms | 253.6ms | **pass** |
+| 22,500/sec, 60s | 22,113/sec | 47.9ms | 386.5ms | 174.6ms | 373.2ms | **pass** |
+| 23,500/sec, 60s | 22,655/sec | 1933.2ms | 4282.0ms | 2601.8ms | 4278.6ms | fail |
+| 25,000/sec, 60s | 24,295/sec | 2050.0ms | 2719.4ms | 2700.8ms | 2797.8ms | fail |
+
+- **Every shape passes comfortably up to a 22,500/sec target (22,113/sec achieved)** — `q=` p95 373.2ms, well
+  under budget, and every other shape has real margin too. 0 ingestion errors and 0 dropped requests at every
+  rate tested, pass or fail.
+- **Between 22,500 and 23,500/sec, the system falls off a cliff, and every shape fails together** — not just
+  `q=`. `docker stats` sampled every 5s through the failing runs shows the *app* container's CPU pinned at
+  ~40-52% (its 0.5-core cap) throughout, not just Postgres (which ranged 0-92%, bursty — consistent with it
+  idling while waiting on an app that's fully saturated). That points at the app container's CPU limit, not a
+  Postgres query-cost problem, as the binding constraint at the top end: past that point the write buffer
+  can't validate/flush fast enough, batches queue up, and ingestion latency itself (not just aggregate
+  latency) blows out to seconds — p95 ingest latency alone goes from 47.9ms (22,500, passing) to 1933.2ms
+  (23,500, failing).
+- **This ceiling is a different failure mode from the pre-fix `q=` slowness** — that was one query shape
+  slowly approaching a budget under sustained load; this is the whole app container running out of CPU and
+  every shape (ingestion included) degrading together, sharply, over a narrow ~1,000/sec band. Pushing past it
+  further (not separately re-measured) would need either more app CPU than the brief's 0.5-core limit allows,
+  or reducing per-batch validation/JSON-handling cost in the ingestion path.
+- One methodology note from getting here: an earlier attempt at this sweep passed `--build` to every
+  `docker compose up`, which does nothing when the image hasn't changed but still burns disk I/O — after ~6
+  rebuilds this had silently accumulated 10.84GB of Docker build cache, and the next couple of runs measured
+  through that contention showed the same "everything degrades together" pattern *without* the app CPU actually
+  being at its cap — a false positive from host-level I/O noise, not the app. Re-run after `docker builder
+  prune` and dropping `--build` from repeat runs (only the first build after a code change needs it) reproduced
+  cleanly. Included here because it's a real trap for reproducing these numbers: don't rebuild an unchanged
+  image on every iteration of a load-test loop.
+
+### The indexing journey: four designs tried for `q=`
 
 `GET /logs/aggregate?q=...` can't use the rollup (only `service`/`level` are pre-aggregated — see [Schema and
 index design](#schema-and-index-design)), so it always falls back to a live scan over `logs`. What accelerates
-that scan — or doesn't — went through three designs, each actually measured, not assumed:
+that scan — or doesn't — went through four designs, each actually measured, not assumed:
 
 **1. Global trigram index (`0000` migration).** Attached to every partition automatically, including whichever
 one is "today". This is the version that caused the very first bottleneck found above: ingestion fell to
@@ -801,17 +859,41 @@ is a single load-generator run whose exact timestamp/write behavior isn't specif
 the one that can't fail badly if that behavior turns out to differ from what's assumed — at some cost in the
 realistic-density case this project isn't actually being tested against.
 
-**Conclusion, and what's still true:** `q=` filtered aggregation remains the slowest query shape, and its
-latency sits close enough to the 1s boundary that it's genuinely variable run to run (measured range across
-runs: p95 768.8ms-923.0ms, p99 up to 1323.9ms in the indexed design, 822.5ms in the final one) — this isn't
-solved, it's the honest remaining gap, mitigated but not eliminated by `AGGREGATE_Q_MAX_CONCURRENT` (see
-[Optional features](#optional-features) and [Known limitations](#known-limitations)), which sheds excess
-concurrent `q=` requests with `429`/`Retry-After` rather than making any single request faster.
+**4. Precomputed lowercase column, no index (shipped).** Designs 1-3 all treated `q=`'s cost as an indexing
+problem — accelerate the scan, or don't. None of them addressed the other lever: the *cost of each row checked*
+during the scan design (3) settled on. `ILIKE`'s case-insensitive match re-lowercases `message` on every row of
+every scan, on every request — the same work, repeated, forever. Since the brief's `q=` contract only requires
+case-insensitive comparison (not case-sensitive `message` access), that lowercasing can happen once, at write
+time, instead:
 
-Higher-rate headroom wasn't separately re-measured beyond the 15,000/sec target above; the container CPU
-headroom measured above (app 26-33%, Postgres peaking at 70%, both with room to spare) suggests some room
-exists, but claiming a specific higher number without measuring it directly would be exactly the kind of
-unverified assumption the brief asks against.
+- `src/db/schema.ts` adds `message_lower`, a Postgres `GENERATED ALWAYS AS (lower(message)) STORED` column —
+  Postgres computes and stores it itself on every insert; `writeBuffer.ts`'s raw `UNNEST` insert doesn't
+  reference it and needs no changes.
+- `src/query/filters.ts`'s `q=` condition became `message_lower LIKE '%term%'` (with `term` lowercased once in
+  JS) instead of `message ILIKE '%term%'`. Same semantics, same query cost *class* — still an unindexed
+  sequential scan on the hot partition, none of design (2)/(1)'s collapse risk reintroduced — just a cheaper
+  per-row comparison: a plain byte substring match instead of locale-aware case-folding.
+
+Measured in isolation first, via `EXPLAIN (ANALYZE, BUFFERS)` against the same static ~1.1M-row partition,
+uncontended (no concurrent ingestion/reads): **525.7ms → 147.2ms, a 3.6x reduction**, same plan shape
+(`Seq Scan` → `HashAggregate`), same buffer-read profile — the only change was the per-row filter cost. Then
+re-measured under the real concurrent-load methodology, at multiple rates, clean runs (fresh `docker compose up`,
+one seed, one run each):
+
+| Rate (target) | `q=` p95 before | `q=` p95 after | Reduction |
+|---|---|---|---|
+| 15,000/sec | 768.8-923.0ms (documented range) | 177.3ms | ~4.8x (vs. midpoint) |
+| 16,000/sec, 70s | 1013.9ms (missed the 1s target) | 271.5ms | 3.7x |
+| 20,000/sec | 1026.5ms (missed, at the stretch rate) | 253.6ms | 4.0x |
+
+**Conclusion, and what's still true:** `q=` filtered aggregation remains the slowest query shape — that's
+inherent to it being the one filter with no index and no rollup, by design, for the robustness reasons in (2)
+and (3) above — but it's no longer the near-1s borderline case designs 1-3 left it as. It's still the first
+shape to degrade as load increases (see the throughput ceiling in [Measured performance
+results](#measured-performance-results)), and `AGGREGATE_Q_MAX_CONCURRENT` (see [Optional
+features](#optional-features) and [Known limitations](#known-limitations)) still exists as a backpressure valve
+for a concurrent pile-up — but the everyday-load number moved from "right at the edge" to comfortably under
+budget.
 
 ## Known Limitations
 
@@ -820,20 +902,23 @@ unverified assumption the brief asks against.
   flushes cleanly) could lose the last fraction of a second of already-acknowledged writes. Acceptable for this
   project's scope; a deployment with stricter durability requirements would leave this at Postgres's default
   (`on`) and look elsewhere for throughput.
-- **`GET /logs/aggregate?q=...` is the slowest query shape and sits close enough to the 1s target that it's
-  genuinely variable run to run** — **confirmed by testing across multiple designs, not just suspected: p95
-  measured anywhere from 768.8ms to 923.0ms depending on the run, p99 up to 1323.9ms in an earlier design**.
-  Root cause: it can't use the rollup (only `service`/`level` are pre-aggregated) and there's no index of any
-  kind on `message` — see [Schema and index design](#schema-and-index-design) for why three different indexing
-  designs were tried and all three either underperformed this one or introduced a real failure mode. Ingestion
-  itself and the two standard aggregate shapes (`group_by=service`, no `q=`) are unaffected — this is
-  specifically a `q=`-filtered-aggregate problem. See [Measured performance
-  results](#measured-performance-results) for the full comparison across all three designs, including one
-  (a trigram index kept live on today's partition) that measurably improved `q=` itself but collapsed every
-  other concurrent query (live p95 3150ms, historical p95 2062ms) — rejected for that reason.
-  `AGGREGATE_Q_MAX_CONCURRENT` (see [Optional features](#optional-features)) bounds the blast radius of a
-  concurrent pile-up with `429`/`Retry-After` — off by default, and a mitigation, not a fix: it doesn't make
-  one request faster.
+- **`GET /logs/aggregate?q=...` is still the slowest query shape**, though no longer a near-1s borderline case:
+  the `message_lower` generated column (migration `0004` — see [Schema and index
+  design](#schema-and-index-design)) cut its p95 by 3-4.8x at every rate tested (e.g. 1013.9ms → 271.5ms at
+  16,000/sec), without an index and without any of the collapse risk the indexed designs showed. Root cause of
+  the remaining gap: it still can't use the rollup (only `service`/`level` are pre-aggregated) and there's still
+  no index of any kind on `message`/`message_lower` — see [Schema and index
+  design](#schema-and-index-design) for why four different designs were tried (three indexed/partially-indexed,
+  one a per-row-cost reduction) and only the last was kept. Ingestion itself and the two standard aggregate
+  shapes (`group_by=service`, no `q=`) are largely unaffected by this specific cost. `AGGREGATE_Q_MAX_CONCURRENT`
+  (see [Optional features](#optional-features)) still exists as a backpressure valve for a concurrent pile-up —
+  off by default, and a mitigation, not a fix: it sheds excess requests rather than making one faster.
+- **Throughput ceiling measured at ~22,500 logs/sec (clean pass) to ~23,500-25,000 logs/sec (fails)** — at and
+  above that range every shape (ingestion included) degrades together (`docker stats` during the failing runs
+  shows the *app* container's CPU pinned at its 0.5-core cap, not just Postgres), so the app container's CPU
+  limit, not Postgres or the `q=` scan specifically, is the binding constraint at the top end. Below ~22,500/sec
+  there's real headroom on both containers. See [Measured performance results](#measured-performance-results)
+  for the full rate sweep.
 - **The aggregate rollup (`logs_hourly_counts`) only covers `service`/`level`** — `q=`/`attr.<key>` filtered
   aggregates always use the live scan (see the point above and [Schema and index
   design](#schema-and-index-design)). It's also only maintained by paths that go through
@@ -865,3 +950,7 @@ unverified assumption the brief asks against.
 - **A higher-than-15,000/sec ingestion rate was not separately measured** — see [Measured performance
   results](#measured-performance-results). The number reported is the one actually run and verified, not an
   extrapolation.
+
+
+
+
