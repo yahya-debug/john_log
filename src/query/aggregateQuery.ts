@@ -1,6 +1,7 @@
 import { aggregateFromRollup, aggregateLogs } from "../db/logs.js";
 import { AggQueryPar, BUCKET_INTERVALS } from "../types/QueryParams.js";
 import { combineConditions, commandCondition } from "./filters.js";
+import { withAggregateCache } from "./aggregateCache.js";
 
 // Only bucket=1h/1d, with no q=/attr.* filter, can be served from the pre-aggregated
 // logs_hourly_counts rollup (see src/db/schema.ts and src/db/logs.ts's
@@ -16,6 +17,12 @@ function canUseRollup(query: any): boolean {
     );
 }
 
+// Rollup-served aggregates are already cheap (reads logs_hourly_counts, O(hours)
+// not O(rows) — see db/logs.ts), so only the live-scan path is worth caching:
+// that's the shape a q=/attr.* filtered request always falls into, and the one
+// that can cost over a second of Postgres CPU per call (see
+// docs/ingestion-bottleneck.md). Caching the cheap path too would just add
+// cache-management overhead for no real saving.
 export async function runAggregate(query: any) {
     if (canUseRollup(query)) {
         const buckets = await aggregateFromRollup(
@@ -26,7 +33,9 @@ export async function runAggregate(query: any) {
         return { buckets };
     }
 
-    const conditions = commandCondition(query);
-    const buckets = await aggregateLogs(combineConditions(conditions), BUCKET_INTERVALS[query.bucket], query.group_by);
-    return { buckets };
+    return withAggregateCache(query, async () => {
+        const conditions = commandCondition(query);
+        const buckets = await aggregateLogs(combineConditions(conditions), BUCKET_INTERVALS[query.bucket], query.group_by);
+        return { buckets };
+    });
 }

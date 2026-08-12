@@ -15,7 +15,9 @@
         "build": "npx tsc",
         "start": "tsx ./src/index.ts",
         "loadtest:seed": "tsx loadtest/seed.ts",
-        "loadtest:mixed": "tsx loadtest/mixed.ts"
+        "loadtest:mixed": "tsx loadtest/mixed.ts",
+        "loadtest:scenarios": "tsx loadtest/scenarios.ts",
+        "loadtest:closedloop": "tsx loadtest/closedloop.ts"
     },
     "keywords": [],
     "author": "",

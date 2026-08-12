@@ -8,6 +8,15 @@ export const logs = pgTable('logs', {
     level: text('level').$type<Level>().notNull(),
     service: text('service').notNull(),
     message: text('message').notNull(),
+    // GENERATED ALWAYS AS ... STORED: Postgres computes and stores this itself on every
+    // insert, so writeBuffer.ts's raw UNNEST insert doesn't need to know it exists. Exists
+    // so q=<substring> (still case-insensitive per the API contract) can compare against an
+    // already-lowercased column with plain LIKE instead of ILIKE — ILIKE case-folds `message`
+    // on every row of every scan, every request; this pays that cost once, at write time,
+    // instead of on every read. Doesn't change the query's cost class (still a sequential
+    // scan on the un-indexed hot partition — see migration 0001 for why no index is built
+    // there), only the per-row constant — measured in README's Measured performance results.
+    messageLower: text('message_lower').notNull().generatedAlwaysAs(sql`lower(message)`),
     attributes: jsonb('attributes').$type<Record<string, number | string | boolean>>().notNull().default({})
 }, (table) => [check('level_check', sql`${table.level} IN ('debug', 'info', 'warn', 'error')`)]);
 

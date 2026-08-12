@@ -7,6 +7,7 @@ vi.mock("../../../src/db/logs.js", () => ({
 
 import { aggregateLogs, aggregateFromRollup } from "../../../src/db/logs.js";
 import { runAggregate } from "../../../src/query/aggregateQuery.js";
+import { resetAggregateCache } from "../../../src/query/aggregateCache.js";
 
 const mockedAggregateLogs = vi.mocked(aggregateLogs);
 const mockedAggregateFromRollup = vi.mocked(aggregateFromRollup);
@@ -14,6 +15,11 @@ const mockedAggregateFromRollup = vi.mocked(aggregateFromRollup);
 beforeEach(() => {
     mockedAggregateLogs.mockReset();
     mockedAggregateFromRollup.mockReset();
+    // Otherwise identical query shapes across these test cases (e.g. two
+    // different tests both calling runAggregate({ bucket: "1m" })) would hit
+    // aggregateQuery.ts's cache and silently return a previous test's mocked
+    // result instead of exercising aggregateLogs again.
+    resetAggregateCache();
 });
 
 // bucket=1h/1d with no q=/attr.* filter routes to the logs_hourly_counts rollup
@@ -76,6 +82,38 @@ describe("runAggregate: live scan path (1m/5m, or any bucket with q=/attr.*)", (
         await runAggregate({ bucket, attr: { user_id: "42" } });
         expect(mockedAggregateLogs).toHaveBeenCalled();
         expect(mockedAggregateFromRollup).not.toHaveBeenCalled();
+    });
+});
+
+describe("runAggregate: live-scan result caching", () => {
+    it("serves a second identical query from cache instead of calling aggregateLogs again", async () => {
+        const rows = [{ start: "2026-07-20T14:00:00Z", group: null, count: 5 }];
+        mockedAggregateLogs.mockResolvedValue(rows as any);
+
+        const first = await runAggregate({ bucket: "1m", q: "declined" });
+        const second = await runAggregate({ bucket: "1m", q: "declined" });
+
+        expect(mockedAggregateLogs).toHaveBeenCalledOnce();
+        expect(second).toEqual(first);
+    });
+
+    it("treats different filters as different cache entries", async () => {
+        mockedAggregateLogs.mockResolvedValueOnce([{ start: "x", group: null, count: 1 }] as any);
+        mockedAggregateLogs.mockResolvedValueOnce([{ start: "x", group: null, count: 2 }] as any);
+
+        const a = await runAggregate({ bucket: "1m", q: "declined" });
+        const b = await runAggregate({ bucket: "1m", q: "timeout" });
+
+        expect(mockedAggregateLogs).toHaveBeenCalledTimes(2);
+        expect(a).not.toEqual(b);
+    });
+
+    it("does not cache the rollup fast path (nothing to save — it's already cheap)", async () => {
+        mockedAggregateFromRollup.mockResolvedValue([]);
+        await runAggregate({ bucket: "1h", since: "2026-07-20T00:00:00Z", until: "2026-07-21T00:00:00Z" });
+        await runAggregate({ bucket: "1h", since: "2026-07-20T00:00:00Z", until: "2026-07-21T00:00:00Z" });
+
+        expect(mockedAggregateFromRollup).toHaveBeenCalledTimes(2);
     });
 });
 

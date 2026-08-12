@@ -34,7 +34,14 @@ export function validateEntry(entry: any, opts: ValidateOpts = {}): ValidationRe
         return { valid: false, reason: "invalid timestamp" };
     if (parsedTime.getTime() > Date.now() + 5*60*1000)
         return { valid: false, reason: "timestamp is more than 5 minutes in the future" };
-    if (!opts.allowStale && isStale(timestamp))
+    // Inlined rather than calling isStale(timestamp): isStale takes a string
+    // and re-parses it with its own `new Date(...)`, which would be a second
+    // Date construction for a value already parsed two lines up as parsedTime.
+    // Redundant Date parsing across the ingestion path was a real, measured
+    // contributor to GC pressure under load (see insertLogs in db/logs.ts).
+    // isStale itself is kept as-is for its other caller (admin.ts's backfill
+    // route), which doesn't have a pre-parsed Date lying around.
+    if (!opts.allowStale && parsedTime.getTime() < Date.now() - Env.RETENTION_DAYS * DAY_MS)
         return { valid: false, reason: `timestamp is older than the retention window (${Env.RETENTION_DAYS} days)` };
 
     if (!isLevel(level))

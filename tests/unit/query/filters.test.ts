@@ -37,16 +37,22 @@ describe("commandCondition / combineConditions", () => {
         expect(params).toEqual(["2026-07-20T14:00:00.000Z", "2026-07-20T15:00:00.000Z"]);
     });
 
-    it("builds a case-insensitive substring match on message via ILIKE, parameterized (not string-concatenated)", () => {
+    it("builds a case-insensitive substring match via LIKE against the precomputed message_lower column, parameterized (not string-concatenated)", () => {
         const { sql, params } = render({ q: "declined" })!;
-        expect(sql).toBe('"logs"."message" ILIKE $1');
+        expect(sql).toBe('"logs"."message_lower" LIKE $1');
+        expect(params).toEqual(["%declined%"]);
+    });
+
+    it("lowercases q itself so case-insensitivity holds against the lowercased column", () => {
+        const { sql, params } = render({ q: "DeClInEd" })!;
+        expect(sql).toBe('"logs"."message_lower" LIKE $1');
         expect(params).toEqual(["%declined%"]);
     });
 
     it("parameterizes q even when it contains SQL metacharacters", () => {
         const { sql, params } = render({ q: "'; DROP TABLE logs; --" })!;
-        expect(sql).toBe('"logs"."message" ILIKE $1');
-        expect(params).toEqual(["%'; DROP TABLE logs; --%"]);
+        expect(sql).toBe('"logs"."message_lower" LIKE $1');
+        expect(params).toEqual(["%'; drop table logs; --%"]);
     });
 
     it("builds an attribute containment check for a single attr.<key>", () => {
@@ -72,7 +78,7 @@ describe("commandCondition / combineConditions", () => {
             q: "declined",
         })!;
         expect(sql).toBe(
-            '("logs"."service" = $1 and "logs"."level" = $2 and "logs"."timestamp" >= $3 and "logs"."message" ILIKE $4)'
+            '("logs"."service" = $1 and "logs"."level" = $2 and "logs"."timestamp" >= $3 and "logs"."message_lower" LIKE $4)'
         );
         expect(params).toEqual(["checkout", "error", "2026-07-20T14:00:00.000Z", "%declined%"]);
     });

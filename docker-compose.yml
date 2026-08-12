@@ -39,6 +39,32 @@ services:
                                    # (live)/1142ms (historical), both over the 1s target; with
                                    # parallel workers off, 306ms/618ms, both comfortably under it.
                                    # Ingest p95 improved too (32ms->11ms) from the freed-up core.
+      - -c
+      - gin_pending_list_limit=32MB # idx_attrs_gin (attributes) can't be dropped — attr.<key>
+                                   # filtering is a required query feature — so its per-write GIN
+                                   # maintenance cost has to be managed, not avoided. GIN defers
+                                   # inserts into a small unsorted "pending list" (fastupdate) so
+                                   # writes don't pay the full sorted-merge cost immediately; once
+                                   # the pending list hits this limit, Postgres is forced to merge it
+                                   # into the main index synchronously, inside whichever insert
+                                   # happens to trigger the overflow — an unpredictable latency spike
+                                   # for that one write. Default is 4MB, small enough to trigger that
+                                   # forced merge often under sustained ingestion. Raised 8x so it
+                                   # fills, and needs merging, far less frequently — trading a
+                                   # slightly larger structure for GIN reads to also scan (attr.<key>
+                                   # queries were already measured at ~3ms, plenty of headroom) for
+                                   # fewer synchronous merge stalls on the write path.
+      - -c
+      - maintenance_work_mem=96MB  # governs how much memory autovacuum (which performs the GIN
+                                   # pending-list merge above, among other maintenance) can use per
+                                   # worker — default 64MB. Raised modestly so that merge completes
+                                   # faster when it does run. Sized conservatively against this
+                                   # container's real 1GB limit: worst case (default
+                                   # autovacuum_max_workers=3) is ~288MB, which combined with
+                                   # shared_buffers (256MB) and work_mem's worst case (~160MB) still
+                                   # leaves headroom under 1GB — deliberately not pushed higher given
+                                   # Postgres memory has already been observed brushing the container
+                                   # limit under sustained load (see docs/ingestion-bottleneck.md).
     environment:
       # Defaults ($VAR:-default) so a plain `docker compose up`, with no .env at all,
       # still boots — required by the brief's "zero configuration" contract. .env

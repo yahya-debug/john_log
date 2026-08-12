@@ -1,0 +1,1 @@
+ALTER TABLE "logs" ADD COLUMN "message_lower" text GENERATED ALWAYS AS (lower(message)) STORED NOT NULL;

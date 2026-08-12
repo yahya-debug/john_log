@@ -37,7 +37,7 @@ const validEntry = {
 };
 
 beforeEach(() => {
-    mockedPushLogs.mockReset();
+    mockedPushLogs.mockReset().mockResolvedValue({ admitted: true });
     mockedRunQuery.mockReset();
 });
 
@@ -60,6 +60,17 @@ describe("POST /logs", () => {
         expect(res.status).toBe(200);
         expect(res.body.accepted).toBe(1);
         expect(res.body.rejected).toEqual([{ index: 1, reason: expect.any(String) }]);
+        expect(mockedPushLogs).toHaveBeenCalledOnce();
+    });
+
+    it("429s with Retry-After and does not 200 when the write buffer has no room for the batch", async () => {
+        mockedPushLogs.mockResolvedValue({ admitted: false, retryAfterSec: 3 });
+
+        const res = await request(buildApp()).post("/logs").send({ logs: [validEntry] });
+
+        expect(res.status).toBe(429);
+        expect(res.headers["retry-after"]).toBe("3");
+        expect(res.body).toEqual({ error: expect.any(String) });
         expect(mockedPushLogs).toHaveBeenCalledOnce();
     });
 

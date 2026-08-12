@@ -30,6 +30,33 @@ beforeEach(() => {
     mockedBegin.mockReset().mockImplementation((cb: any) => cb({}));
 });
 
+describe("writeBuffer admission control", () => {
+    it("admits a batch and reports admitted: true when there's room", async () => {
+        await expect(pushLogs([entry()])).resolves.toEqual({ admitted: true });
+        await flushNow(); // drain so it doesn't count toward later tests' buffer state
+    });
+
+    it("rejects a batch with admitted: false + retryAfterSec when it would overflow a non-empty buffer", async () => {
+        // WRITE_BUFFER_MAX_SIZE defaults to 50_000 — get something already
+        // sitting in the buffer, then ask for more than the remaining room.
+        await pushLogs(Array.from({ length: 5 }, () => entry()));
+
+        const result = await pushLogs(Array.from({ length: 50_000 }, () => entry()));
+
+        expect(result).toEqual({ admitted: false, retryAfterSec: expect.any(Number) });
+        await flushNow();
+    });
+
+    it("still admits a single batch larger than the cap when the buffer is currently empty", async () => {
+        // Otherwise one legitimately large request could never be admitted at all.
+        await flushNow(); // ensure empty first
+        const result = await pushLogs(Array.from({ length: 50_001 }, () => entry()));
+
+        expect(result).toEqual({ admitted: true });
+        await flushNow();
+    });
+});
+
 describe("writeBuffer flush", () => {
     it("does not dead-letter when the flush transaction succeeds", async () => {
         pushLogs([entry({ service: "flush-ok" })]);
