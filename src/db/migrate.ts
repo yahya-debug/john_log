@@ -19,8 +19,8 @@ export async function runMigration() {
 }
 
 // Cheap, synchronous, no DB round-trip or disk read — just reads the flag
-// runMigration() already set. Safe to poll frequently (e.g. a k8s readiness
-// probe), unlike _isReady() below which re-runs the whole migration check.
+// runMigration() already set. Safe to poll frequently (e.g. an orchestrator's
+// readiness probe), unlike _isReady() below which re-runs the whole migration check.
 export function isMigrationReady(): boolean {
     return isReady;
 }

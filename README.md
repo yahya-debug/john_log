@@ -108,7 +108,7 @@ sending any other traffic.
 
 ### `GET /live`
 Not part of the required contract. Liveness only — always `200`, deliberately never checks DB/migration
-state, so a slow-to-migrate database doesn't make an orchestrator (k8s) think the process itself is hung and
+state, so a slow-to-migrate database doesn't make an orchestrator think the process itself is hung and
 restart it.
 
 ### `POST /logs`

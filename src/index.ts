@@ -23,8 +23,8 @@ app.get('/health', function (req, res) {
 })
 
 // Liveness: is the process itself alive? Deliberately never checks DB/
-// migration state — a slow-to-migrate DB shouldn't make k8s think the
-// process is hung and restart it.
+// migration state — a slow-to-migrate DB shouldn't make an orchestrator
+// think the process is hung and restart it.
 app.get('/live', function (req, res) {
     res.status(200).send('alive');
 })
@@ -32,9 +32,10 @@ app.get('/live', function (req, res) {
 const PORT = Env.PORT || 8080;
 const server = app.listen(PORT, () => console.log(`Started on port: ${PORT}`));
 
-// SIGTERM: docker compose stop/down, a k8s pod eviction. SIGINT: Ctrl+C
-// locally. Both mean "stop normally" — as opposed to a crash, where
-// whatever's currently buffered in writeBuffer.ts is expected to be lost.
+// SIGTERM: docker compose stop/down, or an orchestrator evicting the
+// container. SIGINT: Ctrl+C locally. Both mean "stop normally" — as opposed
+// to a crash, where whatever's currently buffered in writeBuffer.ts is
+// expected to be lost.
 const SHUTDOWN_FLUSH_TIMEOUT_MS = 5000;
 
 async function shutdown(signal: string) {
@@ -47,7 +48,7 @@ async function shutdown(signal: string) {
     try {
         // Bounded wait: if Postgres happens to be unreachable right now,
         // flushNow() could hang — don't let that hang shutdown itself
-        // (and whatever's orchestrating it, e.g. Docker/k8s) indefinitely.
+        // (and whatever's orchestrating it) indefinitely.
         await Promise.race([
             flushNow(),
             new Promise((_, reject) =>
