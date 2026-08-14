@@ -108,6 +108,17 @@ describe("runAggregate: live-scan result caching", () => {
         expect(a).not.toEqual(b);
     });
 
+    it("does not cache a plain live-scan query with no q=/attr.* filter — it's already index-backed and cheap", async () => {
+        mockedAggregateLogs.mockResolvedValueOnce([{ start: "x", group: null, count: 1 }] as any);
+        mockedAggregateLogs.mockResolvedValueOnce([{ start: "x", group: null, count: 2 }] as any);
+
+        const first = await runAggregate({ bucket: "1m" });
+        const second = await runAggregate({ bucket: "1m" });
+
+        expect(mockedAggregateLogs).toHaveBeenCalledTimes(2);
+        expect(second).not.toEqual(first);
+    });
+
     it("does not cache the rollup fast path (nothing to save — it's already cheap)", async () => {
         mockedAggregateFromRollup.mockResolvedValue([]);
         await runAggregate({ bucket: "1h", since: "2026-07-20T00:00:00Z", until: "2026-07-21T00:00:00Z" });
