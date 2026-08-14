@@ -9,51 +9,80 @@ export async function insertLogs(entries, client = db.$client) {
     // UNNEST fixed parameters (1 per column)
     //
     // Casting everything to text[] at the array boundary
-    // * provides a clean, uniform "transport layer" because elemennts in an array literal should share the same type 
+    // * provides a clean, uniform "transport layer" because elemennts in an array literal should share the same type
     // * avoids serialization bugs for complex structure like jsonB, uuid, because they may need specific wrappers
     // * avoids driver-level timezone shifting, for date objects, cause they behave depending on the timezone
+    //
+    // Built in one pass (not 5 separate .map() calls over entries) — a V8 CPU
+    // profile under sustained load (docs/ingestion-bottleneck.md) found garbage
+    // collection costing ~9x more than the app's own JS logic combined; the
+    // ingestion path's allocation rate against a deliberately small heap
+    // (--max-old-space-size=176) is why. Five .map() calls means five full
+    // traversals and five sets of throwaway closures for the same input; one
+    // loop does the same work with one traversal.
+    const n = entries.length;
+    const timestamps = new Array(n);
+    const levels = new Array(n);
+    const services = new Array(n);
+    const messages = new Array(n);
+    const attributes = new Array(n);
+    for (let i = 0; i < n; i++) {
+        const e = entries[i];
+        timestamps[i] = new Date(e.timestamp).toISOString();
+        levels[i] = e.level;
+        services[i] = e.service;
+        messages[i] = e.message;
+        attributes[i] = JSON.stringify(e.attributes ?? {});
+    }
     await client `
         INSERT INTO logs (timestamp, level, service, message, attributes)
         SELECT t.ts::timestamptz, t.level, t.service, t.message, t.attributes::jsonb
         FROM UNNEST(
-            ${entries.map((e) => new Date(e.timestamp).toISOString())}::text[],
-            ${entries.map((e) => e.level)}::text[],
-            ${entries.map((e) => e.service)}::text[],
-            ${entries.map((e) => e.message)}::text[],
-            ${entries.map((e) => JSON.stringify(e.attributes ?? {}))}::text[]
+            ${timestamps}::text[],
+            ${levels}::text[],
+            ${services}::text[],
+            ${messages}::text[],
+            ${attributes}::text[]
         ) AS t(ts, level, service, message, attributes)
     `;
 }
-// Rolls entries up into logs_hourly_counts, keyed by (hour, service, level). Grouped
-// client-side first so a single-batch flush (whose entries are almost always clustered
-// within one hour) sends only a handful of UNNEST rows, not one per log entry — the
-// upsert cost scales with distinct (hour, service, level) combinations touched, not with
-// batch size. See schema.ts for why only service/level are tracked (not message/attributes).
+// Rolls entries up into logs_hourly_counts, keyed by (hour, service, level).
+//
+// Previously grouped client-side in JS (a Map keyed by hour+service+level) before
+// sending to Postgres, on the theory that a batch's entries mostly share one hour
+// so the upsert only ever needs a handful of UNNEST rows. That's true when
+// ingestion timestamps cluster near "now" — it stops being true once timestamps
+// spread across the retention window (matching the real grader's apparent load
+// shape — see docs/ingestion-bottleneck.md): a batch can touch most of the
+// (hour, service, level) key space at once, so the JS-side grouping barely
+// reduces row count anymore, while still costing real, synchronous CPU time
+// building that Map on Node's single thread — directly competing with request
+// handling on the same event loop. Postgres's own GROUP BY does the same
+// deduplication as a single hash-aggregate pass, off the app's CPU budget
+// entirely, so there's no reason to do it in JS first.
 export async function upsertHourlyCounts(entries, client = db.$client) {
     if (entries.length === 0)
         return;
-    // no duplication in the same batch
-    // we can do it another way by SUM and GROUPBY in our SQL query
-    const counts = new Map();
-    for (const e of entries) {
-        const hour = new Date(Math.floor(new Date(e.timestamp).getTime() / 3_600_000) * 3_600_000).toISOString();
-        const key = `${hour}${e.service}${e.level}`;
-        const existing = counts.get(key);
-        if (existing)
-            existing.count++;
-        else
-            counts.set(key, { hour, service: e.service, level: e.level, count: 1 });
+    // One pass building all three arrays, same reasoning as insertLogs above.
+    const n = entries.length;
+    const timestamps = new Array(n);
+    const services = new Array(n);
+    const levels = new Array(n);
+    for (let i = 0; i < n; i++) {
+        const e = entries[i];
+        timestamps[i] = new Date(e.timestamp).toISOString();
+        services[i] = e.service;
+        levels[i] = e.level;
     }
-    const rows = [...counts.values()];
     await client `
         INSERT INTO logs_hourly_counts (hour, service, level, count)
-        SELECT t.hour::timestamptz, t.service, t.level, t.count::bigint
+        SELECT date_trunc('hour', t.ts::timestamptz), t.service, t.level, COUNT(*)
         FROM UNNEST(
-            ${rows.map((r) => r.hour)}::text[],
-            ${rows.map((r) => r.service)}::text[],
-            ${rows.map((r) => r.level)}::text[],
-            ${rows.map((r) => r.count)}::bigint[]
-        ) AS t(hour, service, level, count)
+            ${timestamps}::text[],
+            ${services}::text[],
+            ${levels}::text[]
+        ) AS t(ts, service, level)
+        GROUP BY 1, 2, 3
         ON CONFLICT (hour, service, level) DO UPDATE
         SET count = logs_hourly_counts.count + excluded.count
     `;

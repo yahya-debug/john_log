@@ -11,7 +11,10 @@ export function commandCondition(query) {
     if (query.until)
         conditions.push(lt(logs.timestamp, new Date(query.until)));
     if (query.q)
-        conditions.push(sql `${logs.message} ILIKE ${'%' + query.q + '%'}`); // ILIKE for case sensitivity
+        // LIKE against the precomputed message_lower column (see schema.ts) instead of
+        // ILIKE against message: same case-insensitive semantics (both sides lowercased),
+        // but avoids Postgres re-lowercasing `message` on every row of every scan.
+        conditions.push(sql `${logs.messageLower} LIKE ${'%' + query.q.toLowerCase() + '%'}`);
     if (query.attr)
         for (const [key, val] of Object.entries(query.attr))
             conditions.push(sql `${logs.attributes} @> ${JSON.stringify({ [key]: val })}::jsonb`); // @> containment check (gin index)

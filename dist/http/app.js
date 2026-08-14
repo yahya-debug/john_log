@@ -6,6 +6,7 @@ import adminRouter from "./routes/admin.js";
 import { malformedJSON } from "./middleware/errorHandlers.js";
 import { runMigration } from "../db/migrate.js";
 import { retain, retentionJob } from "../retention/job.js";
+import path from "node:path";
 export function App() {
     const app = express();
     // Express's default "simple" query parser doesn't nest dotted keys, so
@@ -19,6 +20,7 @@ export function App() {
     app.use('/logs', logsRouter);
     app.use('/logs/aggregate', aggregateRouter);
     app.use('/admin', adminRouter);
+    app.use('/dashboard', express.static(path.join(process.cwd(), "dashboard", "dist")));
     app.use(malformedJSON);
     // retain() partitions the `logs` table, so it can't run until migrations
     // have created it — chain it onto migration completion instead of firing
