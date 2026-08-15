@@ -30,7 +30,7 @@ describe("runAggregate: live scan path (1m/5m, or any bucket with q=/attr.*)", (
     it("translates the bucket size param into the Postgres interval literal", async () => {
         mockedAggregateLogs.mockResolvedValue([]);
         await runAggregate({ bucket: "5m" });
-        expect(mockedAggregateLogs).toHaveBeenCalledWith(undefined, "5 minutes", undefined);
+        expect(mockedAggregateLogs).toHaveBeenCalledWith(expect.anything(), "5 minutes", undefined);
         expect(mockedAggregateFromRollup).not.toHaveBeenCalled();
     });
 
@@ -47,7 +47,7 @@ describe("runAggregate: live scan path (1m/5m, or any bucket with q=/attr.*)", (
     ])("maps bucket=%s to %s", async (bucket, interval) => {
         mockedAggregateLogs.mockResolvedValue([]);
         await runAggregate({ bucket });
-        expect(mockedAggregateLogs).toHaveBeenCalledWith(undefined, interval, undefined);
+        expect(mockedAggregateLogs).toHaveBeenCalledWith(expect.anything(), interval, undefined);
     });
 
     it("wraps the aggregateLogs result in a { buckets } envelope", async () => {

@@ -1,6 +1,5 @@
-import { and, desc, eq, gte, lt, sql } from "drizzle-orm";
 import { db } from "./db.js";
-import { logs, logsDeadLetter, logsHourlyCounts } from "./schema.js";
+const sql = db.$client;
 export async function insertLogs(entries, client = db.$client) {
     if (entries.length === 0)
         return;
@@ -101,42 +100,41 @@ export async function deadLetterEntries(entries, reason, client = db.$client) {
     `;
 }
 export async function listDeadLetters(limit = 50) {
-    return db.select().from(logsDeadLetter).orderBy(logsDeadLetter.failedAt).limit(limit);
+    return db.$client `
+        SELECT id, failed_at AS "failedAt", reason, entries
+        FROM logs_dead_letter
+        ORDER BY failed_at
+        LIMIT ${limit}
+    `;
 }
 export async function deleteDeadLetter(id) {
-    await db.delete(logsDeadLetter).where(eq(logsDeadLetter.id, id));
+    await db.$client `DELETE FROM logs_dead_letter WHERE id = ${id}`;
 }
-// Split out from queryLogs so tests can EXPLAIN the exact query production runs (see
-// tests/integration/db/queryPlans.test.ts) instead of hand-duplicating the query shape —
-// a duplicated query could silently drift from what's actually executed and assert on
-// the wrong thing.
-export function buildQueryLogsQuery(conditions, limit) {
-    return db.select().from(logs).where(conditions).orderBy(desc(logs.timestamp), desc(logs.id)).limit(limit);
+export async function queryLogs(whereClause, limit) {
+    return db.$client `
+        SELECT id, timestamp, level, service, message, attributes
+        FROM logs
+        ${whereClause}
+        ORDER BY timestamp DESC, id DESC
+        LIMIT ${limit}
+    `;
 }
-export async function queryLogs(conditions, limit) {
-    return await buildQueryLogsQuery(conditions, limit);
-}
-// Same reasoning as buildQueryLogsQuery: kept separate so query-plan tests can reuse
-// the exact production query object.
-export function buildAggregateLogsQuery(conditions, bucket_size, group) {
-    // Alias `start`/`group` explicitly so GROUP BY / ORDER BY can reference the output names directly (a Postgres
-    // extension). Without an alias, drizzle re-serializes an expression differently depending on clause position
-    // (e.g. unqualified "timestamp" in SELECT vs. "logs"."timestamp" in GROUP BY), and Postgres then sees the two
-    // as textually different expressions and rejects the query.
-    const bucketing = sql `date_bin(${bucket_size}::interval, ${logs.timestamp}, TIMESTAMPTZ '2000-01-01')`.as('start');
-    // date_bin: rounds down a given timestamp into a specified interval boundary
-    const group_by = group ? logs[group] : null; // whatever the group was, it's always a column in logs table
-    const groupField = (group_by ? sql `${group_by}` : sql `NULL`).as('group');
-    const baseQuery = db.select({
-        start: bucketing,
-        group: groupField,
-        count: sql `COUNT(*)::int`
-    }).from(logs).where(conditions);
-    // Postgres rejects a bare NULL constant in GROUP BY, so only group by it when a real column is selected.
-    return (group_by ? baseQuery.groupBy(sql `start`, sql `"group"`) : baseQuery.groupBy(sql `start`)).orderBy(sql `start`);
-}
-export async function aggregateLogs(conditions, bucket_size, group) {
-    const rows = await buildAggregateLogsQuery(conditions, bucket_size, group);
+// `start`/`group` are aliased explicitly so GROUP BY / ORDER BY can reference the output
+// names directly (a Postgres extension) instead of repeating the expression.
+export async function aggregateLogs(whereClause, bucket_size, group) {
+    // whatever the group was, it's always a real column on `logs` — validated upstream
+    // (query/validate.ts's isValidGroupBy) to only ever be 'service' or 'level'.
+    const groupColumn = group ? sql(group) : sql `NULL`;
+    const rows = await db.$client `
+        SELECT
+            date_bin(${bucket_size}::interval, timestamp, TIMESTAMPTZ '2000-01-01') AS start,
+            ${groupColumn} AS "group",
+            COUNT(*)::int AS count
+        FROM logs
+        ${whereClause}
+        GROUP BY ${group ? sql `start, "group"` : sql `start`}
+        ORDER BY start
+    `;
     return rows.map((r) => ({
         start: new Date(r.start).toISOString(),
         group: r.group,
@@ -148,27 +146,33 @@ export async function aggregateLogs(conditions, bucket_size, group) {
 // routing, and schema.ts for why). Cost scales with hours-in-range × distinct
 // service/level combinations, not with how many raw rows exist in that range.
 export async function aggregateFromRollup(filters, bucket, group) {
+    // .toISOString(), not raw Dates — see query/filters.ts's since/until comment:
+    // db.$client (drizzle-wrapped) doesn't serialize bare Date params correctly on
+    // raw tagged-template queries.
     const conditions = [
-        gte(logsHourlyCounts.hour, filters.since),
-        lt(logsHourlyCounts.hour, filters.until),
+        sql `hour >= ${filters.since.toISOString()}`,
+        sql `hour < ${filters.until.toISOString()}`,
     ];
     if (filters.service)
-        conditions.push(eq(logsHourlyCounts.service, filters.service));
+        conditions.push(sql `service = ${filters.service}`);
     if (filters.level)
-        conditions.push(eq(logsHourlyCounts.level, filters.level));
+        conditions.push(sql `level = ${filters.level}`);
     // 1h buckets are already the rollup's own granularity (no re-bucketing needed);
     // 1d re-buckets by flooring further, the same way aggregateLogs's date_bin does.
-    const bucketing = (bucket === "1d"
-        ? sql `date_bin('1 day'::interval, ${logsHourlyCounts.hour}, TIMESTAMPTZ '2000-01-01')`
-        : sql `${logsHourlyCounts.hour}`).as('start');
-    const group_by = group ? logsHourlyCounts[group] : null;
-    const groupField = (group_by ? sql `${group_by}` : sql `NULL`).as('group');
-    const baseQuery = db.select({
-        start: bucketing,
-        group: groupField,
-        count: sql `SUM(${logsHourlyCounts.count})::int`,
-    }).from(logsHourlyCounts).where(and(...conditions));
-    const rows = await (group_by ? baseQuery.groupBy(sql `start`, sql `"group"`) : baseQuery.groupBy(sql `start`)).orderBy(sql `start`);
+    const bucketing = bucket === "1d"
+        ? sql `date_bin('1 day'::interval, hour, TIMESTAMPTZ '2000-01-01')`
+        : sql `hour`;
+    const groupColumn = group ? sql(group) : sql `NULL`;
+    const rows = await db.$client `
+        SELECT
+            ${bucketing} AS start,
+            ${groupColumn} AS "group",
+            SUM(count)::int AS count
+        FROM logs_hourly_counts
+        WHERE ${conditions.flatMap((c, i) => (i === 0 ? [c] : [sql ` AND `, c]))}
+        GROUP BY ${group ? sql `start, "group"` : sql `start`}
+        ORDER BY start
+    `;
     return rows.map((r) => ({
         start: new Date(r.start).toISOString(),
         group: r.group,

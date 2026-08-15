@@ -1,9 +1,7 @@
-import { and, eq, lt, or, SQL } from "drizzle-orm";
 import { Log } from "../types/log.js";
 import { DEFAULT_LIMIT, LogQueryPar, MAX_LIMIT } from "../types/QueryParams.js";
 import { decodeCursor, encodeCursor } from "./cursor.js";
-import { combineConditions, commandCondition } from "./filters.js";
-import { logs } from "../db/schema.js";
+import { combineConditions, commandCondition, sql } from "./filters.js";
 import { queryLogs } from "../db/logs.js";
 
 export interface LogQueryRes {
@@ -16,8 +14,11 @@ export async function runQuery(query: LogQueryPar): Promise<LogQueryRes> {
 
     if (query.cursor) {
         const { timestamp, id } = decodeCursor(query.cursor);
+        const cursorTimestamp = new Date(timestamp).toISOString(); // see filters.ts's since/until for why not a raw Date
 
-        conditions.push(or(lt(logs.timestamp, new Date(timestamp)), and(eq(logs.timestamp, new Date(timestamp)), lt(logs.id, id))) as SQL)
+        // keyset pagination: strictly "after" the last row of the previous page, in the
+        // same (timestamp DESC, id DESC) order queryLogs sorts by.
+        conditions.push(sql`(timestamp < ${cursorTimestamp} OR (timestamp = ${cursorTimestamp} AND id < ${id}))`)
     }
 
     const limit = Math.min(query.limit ?? DEFAULT_LIMIT, MAX_LIMIT);

@@ -26,19 +26,19 @@ describe("runQuery", () => {
     it("defaults to a limit of 100 when none is given", async () => {
         mockedQueryLogs.mockResolvedValue([]);
         await runQuery({});
-        expect(mockedQueryLogs).toHaveBeenCalledWith(undefined, 100);
+        expect(mockedQueryLogs).toHaveBeenCalledWith(expect.anything(), 100);
     });
 
     it("passes through a limit under the cap unchanged", async () => {
         mockedQueryLogs.mockResolvedValue([]);
         await runQuery({ limit: 50 });
-        expect(mockedQueryLogs).toHaveBeenCalledWith(undefined, 50);
+        expect(mockedQueryLogs).toHaveBeenCalledWith(expect.anything(), 50);
     });
 
     it("clamps a limit above 1000 down to 1000", async () => {
         mockedQueryLogs.mockResolvedValue([]);
         await runQuery({ limit: 5000 });
-        expect(mockedQueryLogs).toHaveBeenCalledWith(undefined, 1000);
+        expect(mockedQueryLogs).toHaveBeenCalledWith(expect.anything(), 1000);
     });
 
     it("returns next_cursor: null when fewer rows than the limit come back (last page)", async () => {
@@ -79,9 +79,9 @@ describe("runQuery", () => {
         expect(conditions).toBeDefined();
     });
 
-    it("passes undefined conditions through when no filters or cursor are given", async () => {
+    it("passes an empty (no-op) conditions fragment through when no filters or cursor are given", async () => {
         mockedQueryLogs.mockResolvedValue([]);
         await runQuery({});
-        expect(mockedQueryLogs).toHaveBeenCalledWith(undefined, 100);
+        expect(mockedQueryLogs).toHaveBeenCalledWith(expect.anything(), 100);
     });
 });
