@@ -9,17 +9,28 @@
 // the cache key means those near-duplicate calls collapse onto the same
 // entry instead of each re-paying the full scan.
 //
-// Cache staleness is bounded by ROUND_MS + TTL_MS — a few seconds at the
-// default settings, well inside the brief's 20-second "queryable within"
-// budget, and consistent with the system's existing design (the write buffer
-// already trades a bounded amount of visibility lag for throughput).
+// Cache staleness is bounded by ROUND_MS + TTL_MS, well inside the brief's
+// 20-second "queryable within" budget, and consistent with the system's
+// existing design (the write buffer already trades a bounded amount of
+// visibility lag for throughput).
+//
+// Both set to 1000ms — matching the "one aggregate request per second" access
+// pattern this whole cache is reasoned around (see the header above), not
+// double it. ROUND_MS larger than the actual polling interval doesn't
+// reliably improve the hit rate for consecutive ~1s-apart polls (two calls
+// 1000ms apart can straddle a 2000ms bucket boundary just as often as they
+// land in the same one) — it only adds staleness without a matching benefit.
+// Aligning ROUND_MS to the real cadence keeps the intended "collapse
+// near-duplicate calls within the same second" behavior while roughly
+// halving worst-case staleness (~4s -> ~2s), which matters for read-after-
+// write checks that probe well before the 20s budget is used up.
 //
 // Doesn't change the response shape, doesn't add a required param, and can't
 // turn a request that would have succeeded into a failure — it only ever
-// returns exactly what a fresh computation would have, just possibly a few
-// seconds newer or older. Safe under the Golden Rule.
-const TTL_MS = Number(process.env.AGGREGATE_CACHE_TTL_MS) || 2000;
-const ROUND_MS = Number(process.env.AGGREGATE_CACHE_ROUND_MS) || 2000;
+// returns exactly what a fresh computation would have, just possibly up to a
+// couple seconds newer or older. Safe under the Golden Rule.
+const TTL_MS = Number(process.env.AGGREGATE_CACHE_TTL_MS) || 1000;
+const ROUND_MS = Number(process.env.AGGREGATE_CACHE_ROUND_MS) || 1000;
 const MAX_ENTRIES = Number(process.env.AGGREGATE_CACHE_MAX_ENTRIES) || 1000;
 
 type CacheEntry<T> = { expiresAt: number; result: T };

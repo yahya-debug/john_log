@@ -20,6 +20,30 @@ function isValidGroupBy(group_by: unknown): boolean {
     return group_by === undefined || group_by === 'service' || group_by === 'level';
 }
 
+// A repeated query param (e.g. ?q=a&q=b, or ?attr.user_id=1&attr.user_id=2) parses
+// via qs into an array instead of a string — level/cursor/bucket/group_by all happen
+// to reject that safely already (typeof checks, or Date coercion producing NaN), but
+// service/q/attr.<key> went straight into commandCondition (filters.ts) unguarded:
+// query.q.toLowerCase() on an array throws (500, unhandled), and an array/object
+// value interpolated as a SQL parameter for service silently matches nothing instead
+// of filtering or erroring. Reject all three the same way the other params already
+// are, rather than let a malformed request 500 or silently return wrong results.
+function invalidStringFilterParam(query: Request["query"]): string | null {
+    if ("service" in query && typeof query.service !== 'string')
+        return "service must be a single string value";
+    if ("q" in query && typeof query.q !== 'string')
+        return "q must be a single string value";
+    if ("attr" in query) {
+        const attr = query.attr;
+        if (typeof attr !== 'object' || attr === null || Array.isArray(attr))
+            return "attr.<key> filters must each be a single string value";
+        for (const key in attr as Record<string, unknown>)
+            if (typeof (attr as Record<string, unknown>)[key] !== 'string')
+                return "attr.<key> filters must each be a single string value";
+    }
+    return null;
+}
+
 function validateTimeRange(query: Request["query"]): string | null {
     if ("since" in query) {
         const since_date = new Date(query.since as string);
@@ -63,6 +87,10 @@ export function validateQueryParams(req: Request, res: Response, next: NextFunct
     if ("cursor" in query && !isValidCursor(query.cursor))
         return res.status(400).json({ error: "invalid or malformed cursor" })
 
+    const filterError = invalidStringFilterParam(query);
+    if (filterError)
+        return res.status(400).json({ error: filterError })
+
     next();
 }
 
@@ -84,6 +112,10 @@ export function validateAggregateParams(req: Request, res: Response, next: NextF
 
     if (!isValidGroupBy(query.group_by))
         return res.status(400).json({ error: "group_by must be 'service' or 'level'" });
+
+    const filterError = invalidStringFilterParam(query);
+    if (filterError)
+        return res.status(400).json({ error: filterError })
 
     next();
 }

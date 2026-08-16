@@ -105,6 +105,36 @@ describe("validateQueryParams", () => {
         expect(res.status).toHaveBeenCalledWith(400);
         expect(res.json).toHaveBeenCalledWith({ error: "invalid or malformed cursor" });
     });
+
+    // A repeated query param (?q=a&q=b) parses via qs into an array, not a string —
+    // commandCondition (filters.ts) would otherwise call .toLowerCase() on it and
+    // throw an unhandled 500. Catch it here instead.
+    it("400s when q is repeated (parses to an array)", () => {
+        const res = mockRes();
+        validateQueryParams(mockReq({ q: ["a", "b"] }), res, vi.fn());
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(res.json).toHaveBeenCalledWith({ error: "q must be a single string value" });
+    });
+
+    it("400s when service is repeated (parses to an array)", () => {
+        const res = mockRes();
+        validateQueryParams(mockReq({ service: ["a", "b"] }), res, vi.fn());
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(res.json).toHaveBeenCalledWith({ error: "service must be a single string value" });
+    });
+
+    it("400s when an attr.<key> value is repeated (parses to an array)", () => {
+        const res = mockRes();
+        validateQueryParams(mockReq({ attr: { user_id: ["1", "2"] } }), res, vi.fn());
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(res.json).toHaveBeenCalledWith({ error: "attr.<key> filters must each be a single string value" });
+    });
+
+    it("calls next() when q/service/attr are normal single strings", () => {
+        const next = vi.fn();
+        validateQueryParams(mockReq({ q: "declined", service: "checkout", attr: { user_id: "42" } }), mockRes(), next);
+        expect(next).toHaveBeenCalledOnce();
+    });
 });
 
 describe("validateAggregateParams", () => {
@@ -164,5 +194,12 @@ describe("validateAggregateParams", () => {
         const res = mockRes();
         validateAggregateParams(mockReq({ bucket: "30s" }), res, vi.fn());
         expect(res.json).toHaveBeenCalledWith({ error: "invalid bucket size" });
+    });
+
+    it("400s when q is repeated (parses to an array)", () => {
+        const res = mockRes();
+        validateAggregateParams(mockReq({ ...validBase, q: ["a", "b"] }), res, vi.fn());
+        expect(res.status).toHaveBeenCalledWith(400);
+        expect(res.json).toHaveBeenCalledWith({ error: "q must be a single string value" });
     });
 });

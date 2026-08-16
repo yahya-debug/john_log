@@ -149,19 +149,23 @@ export async function aggregateFromRollup(filters, bucket, group) {
     // .toISOString(), not raw Dates — see query/filters.ts's since/until comment:
     // db.$client (drizzle-wrapped) doesn't serialize bare Date params correctly on
     // raw tagged-template queries.
-    const conditions = [
-        sql `hour >= ${filters.since.toISOString()}`,
-        sql `hour < ${filters.until.toISOString()}`,
-    ];
-    if (filters.service)
-        conditions.push(sql `service = ${filters.service}`);
-    if (filters.level)
-        conditions.push(sql `level = ${filters.level}`);
-    // 1h buckets are already the rollup's own granularity (no re-bucketing needed);
-    // 1d re-buckets by flooring further, the same way aggregateLogs's date_bin does.
+    //
+    // since/until are always present (required by AggQueryPar), so they're inlined
+    // straight into the outer template instead of built as separate sql`` fragments —
+    // this query runs concurrently with ingestion in every load scenario (see
+    // loadtest/scenarios.ts), so the fewer Fragment objects (each a Promise
+    // subclass — real allocation cost, not free) built per call, the less GC
+    // pressure it adds on top of the write path during exactly the window that's
+    // already CPU-starved (see README's Measured performance results). Only
+    // service/level, which aren't always present, still need their own fragments.
+    // sql(name) builds a lightweight Identifier (plain object), not a Query — unlike
+    // every sql`...` tagged-template call, which constructs a full Query (extends
+    // Promise, real allocation cost). Prefer it whenever the piece is just a bare
+    // column name, same as the original code did — only date_bin(...) genuinely
+    // needs a real fragment, since it's an expression, not an identifier.
     const bucketing = bucket === "1d"
         ? sql `date_bin('1 day'::interval, hour, TIMESTAMPTZ '2000-01-01')`
-        : sql `hour`;
+        : sql("hour");
     const groupColumn = group ? sql(group) : sql `NULL`;
     const rows = await db.$client `
         SELECT
@@ -169,7 +173,9 @@ export async function aggregateFromRollup(filters, bucket, group) {
             ${groupColumn} AS "group",
             SUM(count)::int AS count
         FROM logs_hourly_counts
-        WHERE ${conditions.flatMap((c, i) => (i === 0 ? [c] : [sql ` AND `, c]))}
+        WHERE hour >= ${filters.since.toISOString()} AND hour < ${filters.until.toISOString()}
+            ${filters.service ? sql `AND service = ${filters.service}` : sql ``}
+            ${filters.level ? sql `AND level = ${filters.level}` : sql ``}
         GROUP BY ${group ? sql `start, "group"` : sql `start`}
         ORDER BY start
     `;
