@@ -1,23 +1,26 @@
 // Seeds a small pre-existing history directly through drizzle (bypassing HTTP), so
-// loadtest/mixed.ts's own ingestion — not this script — is what brings the table up
+// loadtest/k6-ingest.js's own ingestion — not this script — is what brings the table up
 // to the brief's "~1,000,000 stored log records" target. The brief only defines one
-// way data enters the system (POST /logs), so mixed.ts's live traffic is the intended
-// mechanism for reaching that row count, not a bulk pre-load: this script exists only
-// to give the "historical" aggregate query shape something pre-existing and
-// multi-day to range over, distinct from whatever mixed.ts adds live during its own
-// run. Usage: SEED_ROWS=100000 npx tsx loadtest/seed.ts
+// way data enters the system (POST /logs), so the k6 script's live traffic is the
+// intended mechanism for reaching that row count, not a bulk pre-load: this script
+// exists only to give the "historical" aggregate query shape something pre-existing
+// and multi-day to range over, distinct from whatever the k6 run adds live during its
+// own run. Usage: SEED_ROWS=100000 npx tsx loadtest/seed.ts
 import { sql } from "drizzle-orm";
 import { db } from "../src/db/db.js";
 import { logs } from "../src/db/schema.js";
-import { pick } from "./util.js";
 import type { Level } from "../src/types/log.js";
 import { retain } from "../src/retention/job.js";
+
+function pick<T>(arr: readonly T[]): T {
+    return arr[Math.floor(Math.random() * arr.length)];
+}
 
 const TOTAL_ROWS = Number(process.env.SEED_ROWS) || 100_000;
 const BATCH_SIZE = 2_000;
 const CONCURRENCY = 8;
 // spread across the past N days so the table looks like real accumulated
-// history, distinct from the live window the mixed test queries. Default 30
+// history, distinct from the live window the k6 test queries. Default 30
 // to match the brief's stated density ("~1,000,000 records represent
 // approximately one month of data") — a denser spread (e.g. 7 days) makes
 // range-scanning aggregate queries look artificially more expensive than the

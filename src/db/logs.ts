@@ -1,6 +1,6 @@
 import type postgres from "postgres";
 import { Level, ValidatedLog } from "../types/log.js";
-import { db } from "./db.js";
+import { db, readClient } from "./db.js";
 
 // Accepts an optional transaction-scoped client so callers (writeBuffer.ts) can run
 // the raw insert and the rollup upsert (upsertHourlyCounts, below) as one atomic unit
@@ -147,8 +147,9 @@ export async function deleteDeadLetter(id: string): Promise<void> {
     await db.$client`DELETE FROM logs_dead_letter WHERE id = ${id}`;
 }
 
+// readClient, not db.$client: GET /logs reads from the replica — see db/db.ts's readClient.
 export async function queryLogs(whereClause: postgres.Fragment, limit: number) {
-    return db.$client<LogRow[]>`
+    return readClient<LogRow[]>`
         SELECT id, timestamp, level, service, message, attributes
         FROM logs
         ${whereClause}
@@ -164,7 +165,8 @@ export async function aggregateLogs(whereClause: postgres.Fragment, bucket_size:
     // (query/validate.ts's isValidGroupBy) to only ever be 'service' or 'level'.
     const groupColumn = group ? sql(group) : sql`NULL`;
 
-    const rows = await db.$client<AggregateRow[]>`
+    // readClient, not db.$client: GET /logs/aggregate reads from the replica too.
+    const rows = await readClient<AggregateRow[]>`
         SELECT
             date_bin(${bucket_size}::interval, timestamp, TIMESTAMPTZ '2000-01-01') AS start,
             ${groupColumn} AS "group",
@@ -197,8 +199,8 @@ export async function aggregateFromRollup(
     //
     // since/until are always present (required by AggQueryPar), so they're inlined
     // straight into the outer template instead of built as separate sql`` fragments —
-    // this query runs concurrently with ingestion in every load scenario (see
-    // loadtest/scenarios.ts), so the fewer Fragment objects (each a Promise
+    // this query runs concurrently with ingestion under sustained load (see
+    // loadtest/k6/lib.js), so the fewer Fragment objects (each a Promise
     // subclass — real allocation cost, not free) built per call, the less GC
     // pressure it adds on top of the write path during exactly the window that's
     // already CPU-starved (see README's Measured performance results). Only
@@ -213,7 +215,8 @@ export async function aggregateFromRollup(
         : sql("hour");
     const groupColumn = group ? sql(group) : sql`NULL`;
 
-    const rows = await db.$client<AggregateRow[]>`
+    // readClient, not db.$client: same reasoning as queryLogs/aggregateLogs above.
+    const rows = await readClient<AggregateRow[]>`
         SELECT
             ${bucketing} AS start,
             ${groupColumn} AS "group",

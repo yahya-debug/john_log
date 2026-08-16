@@ -3,7 +3,7 @@ import qs from "qs";
 import logsRouter from "./routes/logs.js";
 import aggregateRouter from "./routes/aggregate.js"
 import adminRouter from "./routes/admin.js"
-import { errorCatcher, malformedJSON } from "./middleware/errorHandlers.js";
+import { finalErrorHandler, malformedJSON } from "./middleware/errorHandlers.js";
 import { runMigration } from "../db/migrate.js";
 import { retain, retentionJob } from "../retention/job.js";
 import path from "node:path";
@@ -28,6 +28,10 @@ export function App() {
 
 
     app.use(malformedJSON);
+    // Last: catches anything malformedJSON didn't (an unexpected query error,
+    // a dropped connection, etc.) and turns it into a clean 500 instead of
+    // letting it crash the process — see middleware/errorHandlers.ts.
+    app.use(finalErrorHandler);
 
     // retain() partitions the `logs` table, so it can't run until migrations
     // have created it — chain it onto migration completion instead of firing

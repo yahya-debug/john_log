@@ -15,9 +15,10 @@
         "build": "npx tsc",
         "start": "tsx ./src/index.ts",
         "loadtest:seed": "tsx loadtest/seed.ts",
-        "loadtest:mixed": "tsx loadtest/mixed.ts",
-        "loadtest:scenarios": "tsx loadtest/scenarios.ts",
-        "loadtest:closedloop": "tsx loadtest/closedloop.ts"
+        "loadtest:k6:load": "bash loadtest/k6/run.sh loadtest/k6/load.js",
+        "loadtest:k6:stress": "bash loadtest/k6/run.sh loadtest/k6/stress.js",
+        "loadtest:k6:spike": "bash loadtest/k6/run.sh loadtest/k6/spike.js",
+        "loadtest:k6:breakpoint": "bash loadtest/k6/run.sh loadtest/k6/breakpoint.js"
     },
     "keywords": [],
     "author": "",
