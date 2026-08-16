@@ -119,7 +119,41 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.replica
-    command: ["postgres", "-c", "hot_standby_feedback=on"] # hot_standby_feedback is on, so: 
+    # Was running on stock Postgres defaults before this — only hot_standby_feedback
+    # was set. That's a real gap, not a neutral default: effective_cache_size defaults
+    # to 4GB on a container capped at 512MB (actively misleads the planner about how
+    # much page cache is actually available), and max_parallel_workers_per_gather
+    # never inherited the fix that measurably helped the primary's aggregate queries
+    # (README's Measured performance results: 1134ms->306ms) — the replica has the
+    # exact same 1-real-CPU constraint the primary does, so "parallel" workers here
+    # are pure Gather-coordination overhead too, not real parallelism.
+    command:
+      - postgres
+      - -c
+      - hot_standby_feedback=on   # tells the primary not to vacuum away rows this
+                                   # replica's queries might still be reading — without
+                                   # it, a read here can get killed mid-flight by the
+                                   # primary's own cleanup (see db/db.ts's comment on
+                                   # the read connection, and the crash this caused
+                                   # before finalErrorHandler existed).
+      - -c
+      - shared_buffers=128MB      # ~25% of the replica's real 512MB — same ratio the
+                                   # primary uses against its 1GB, not a separate guess.
+      - -c
+      - effective_cache_size=384MB # ~75% of 512MB, same ratio as the primary's 768MB/1GB —
+                                   # was defaulting to 4GB, 8x more than this container
+                                   # actually has, which is worse than not setting it at
+                                   # all: a wrong-but-confident planner hint.
+      - -c
+      - work_mem=16MB             # same value as the primary — this instance now runs
+                                   # every aggregate shape (live/historical/q=) that used
+                                   # to be split across primary+cache, so its HashAggregate
+                                   # cost is real, not incidental.
+      - -c
+      - max_parallel_workers_per_gather=0 # same reasoning as the primary's identical
+                                   # setting (docker-compose.yml above): 1 real CPU means
+                                   # parallel workers add coordination cost with no actual
+                                   # parallelism to show for it.
     environment:
       PGDATA: /var/lib/postgresql/data
       PRIMARY_HOST: postgres
