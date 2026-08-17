@@ -70,6 +70,20 @@ jobs:
           curl -sf -X POST http://localhost:8080/logs \
             -H "Content-Type: application/json" \
             -d '{"logs":[{"timestamp":"2026-07-28T00:00:00.000Z","level":"info","service":"ci","message":"smoke test"}]}'
+      - name: smoke test query (exercises the read replica, not just the primary)
+        run: |
+          for i in {1..15}; do
+            body=$(curl -sf "http://localhost:8080/logs?service=ci")
+            count=$(echo "$body" | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>console.log(JSON.parse(d).logs.length))")
+            if [ "$count" -gt 0 ]; then
+              echo "found $count log(s) via GET /logs — read path (replica) works"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "GET /logs never returned the entry POSTed above — replica/read path broken"
+          docker compose logs
+          exit 1
       - name: tear down
         if: always()
         run: docker compose down -v

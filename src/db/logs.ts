@@ -1,6 +1,6 @@
 import type postgres from "postgres";
 import { Level, ValidatedLog } from "../types/log.js";
-import { db, readClient } from "./db.js";
+import { db, withReplicaFallback } from "./db.js";
 
 // Accepts an optional transaction-scoped client so callers (writeBuffer.ts) can run
 // the raw insert and the rollup upsert (upsertHourlyCounts, below) as one atomic unit
@@ -8,38 +8,6 @@ import { db, readClient } from "./db.js";
 type SqlClient = postgres.ISql<{}>;
 
 const sql = db.$client;
-
-// Connection-level failures only (the replica unreachable — e.g. still mid
-// pg_basebackup right after boot, since app.ts no longer waits on it being
-// healthy before starting — or a transient network blip later). Anything
-// else (a genuine query bug) rethrows unchanged instead of silently retrying
-// against the primary and masking it.
-const CONNECTION_ERROR_CODES = new Set([
-    "CONNECTION_CLOSED", "CONNECTION_DESTROYED", "CONNECT_TIMEOUT",
-    "ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ECONNRESET",
-]);
-
-function isConnectionError(err: unknown): boolean {
-    return typeof err === "object" && err !== null && "code" in err
-        && CONNECTION_ERROR_CODES.has(String((err as { code: unknown }).code));
-}
-
-// Every read (queryLogs/aggregateLogs/aggregateFromRollup) goes through this
-// instead of calling readClient directly — if the replica isn't reachable,
-// the exact same query just runs against the primary instead of failing the
-// request. Without this, a GET arriving in the (small, but real) window
-// before the replica finishes its initial clone would 500 — an error the
-// core, no-replica service would never have produced, which the read
-// replica exists to speed reads up, not to be a new way for them to fail.
-async function withReplicaFallback<T>(run: (client: SqlClient) => Promise<T>): Promise<T> {
-    try {
-        return await run(readClient);
-    } catch (err) {
-        if (!isConnectionError(err)) throw err;
-        console.warn(`read replica unreachable, falling back to primary: ${(err as Error).message}`);
-        return run(db.$client);
-    }
-}
 
 interface LogRow {
     id: string;
@@ -179,8 +147,8 @@ export async function deleteDeadLetter(id: string): Promise<void> {
     await db.$client`DELETE FROM logs_dead_letter WHERE id = ${id}`;
 }
 
-// readClient, not db.$client: GET /logs reads from the replica — see db/db.ts's
-// readClient and withReplicaFallback above for what happens if it's unreachable.
+// GET /logs reads from the replica via withReplicaFallback (db/db.ts) — see
+// its comment there for what happens if the replica is unreachable.
 export async function queryLogs(whereClause: postgres.Fragment, limit: number) {
     return withReplicaFallback((client) => client<LogRow[]>`
         SELECT id, timestamp, level, service, message, attributes
@@ -198,8 +166,7 @@ export async function aggregateLogs(whereClause: postgres.Fragment, bucket_size:
     // (query/validate.ts's isValidGroupBy) to only ever be 'service' or 'level'.
     const groupColumn = group ? sql(group) : sql`NULL`;
 
-    // readClient, not db.$client: GET /logs/aggregate reads from the replica too
-    // (see withReplicaFallback above for the unreachable-replica case).
+    // GET /logs/aggregate reads from the replica too — same withReplicaFallback.
     const rows = await withReplicaFallback((client) => client<AggregateRow[]>`
         SELECT
             date_bin(${bucket_size}::interval, timestamp, TIMESTAMPTZ '2000-01-01') AS start,
@@ -249,7 +216,7 @@ export async function aggregateFromRollup(
         : sql("hour");
     const groupColumn = group ? sql(group) : sql`NULL`;
 
-    // readClient, not db.$client: same reasoning as queryLogs/aggregateLogs above.
+    // Same reasoning as queryLogs/aggregateLogs above.
     const rows = await withReplicaFallback((client) => client<AggregateRow[]>`
         SELECT
             ${bucketing} AS start,

@@ -17,31 +17,31 @@ function canUseRollup(query: any): boolean {
     );
 }
 
-// The one live-scan shape actually expensive enough to justify trading a few
-// seconds of staleness for (see aggregateCache.ts's header comment): q=/attr.*
-// filters have no supporting index, so a single call can cost over a second of
-// Postgres CPU. A plain bucket=1m/5m query with no filter is already cheap and
-// index-backed — caching it too would buy nothing but staleness on a shape a
-// correctness check (POST /logs then immediately GET .../aggregate) is very
-// likely to hit.
-function isFilteredLiveScan(query: any): boolean {
-    return !!query.q || !!(query.attr && Object.keys(query.attr).length > 0);
-}
-
-// Rollup-served aggregates are already cheap (reads logs_hourly_counts, O(hours)
-// not O(rows) — see db/logs.ts), so only the live-scan path is worth caching:
-// that's the shape a q=/attr.* filtered request always falls into, and the one
-// that can cost over a second of Postgres CPU per call (see
-// docs/ingestion-bottleneck.md). Caching the cheap path too would just add
-// cache-management overhead for no real saving.
+// Every shape gets cached now, not just q=/attr.* filtered queries — see
+// aggregateCache.ts's header comment for why the original "only cache what's
+// individually expensive" reasoning stopped holding once reads moved to a
+// dedicated replica (README's Schema and index design). Measured directly:
+// with only the filtered shape cached, the *unfiltered* live-window shape
+// (bucket=1m, no filter — the one this used to skip caching for specifically
+// because it was "already cheap and index-backed") had a *worse* p95 (21.94s)
+// than the genuinely expensive q=-filtered scan (21.54s), and even the
+// rollup-served historical shape — reading a handful of rows from a small
+// table — sat at 12.38s. None of those are individually expensive queries;
+// they were all queuing behind each other on the replica's one CPU core.
+// Caching every shape cuts how often *any* of them actually reaches Postgres,
+// which is the lever that matters when the bottleneck is concurrent volume
+// on a single core, not any one query's own cost.
 export async function runAggregate(query: any) {
     if (canUseRollup(query)) {
-        const buckets = await aggregateFromRollup(
-            { service: query.service, level: query.level, since: new Date(query.since), until: new Date(query.until) },
-            query.bucket,
-            query.group_by
-        );
-        return { buckets };
+        const compute = async () => {
+            const buckets = await aggregateFromRollup(
+                { service: query.service, level: query.level, since: new Date(query.since), until: new Date(query.until) },
+                query.bucket,
+                query.group_by
+            );
+            return { buckets };
+        };
+        return withAggregateCache(query, compute);
     }
 
     const compute = async () => {
@@ -50,5 +50,5 @@ export async function runAggregate(query: any) {
         return { buckets };
     };
 
-    return isFilteredLiveScan(query) ? withAggregateCache(query, compute) : compute();
+    return withAggregateCache(query, compute);
 }

@@ -108,23 +108,35 @@ describe("runAggregate: live-scan result caching", () => {
         expect(a).not.toEqual(b);
     });
 
-    it("does not cache a plain live-scan query with no q=/attr.* filter — it's already index-backed and cheap", async () => {
+    // Reversed from the original design: measured directly under concurrent
+    // load on the read replica, the plain (unfiltered) live-scan shape had a
+    // *worse* p95 than the genuinely expensive q=-filtered one — not because
+    // it's individually costly, but because every shape queues behind every
+    // other one on the replica's single CPU core. Caching it too cuts total
+    // query volume reaching Postgres, which is what actually matters here.
+    it("caches a plain live-scan query with no q=/attr.* filter too", async () => {
         mockedAggregateLogs.mockResolvedValueOnce([{ start: "x", group: null, count: 1 }] as any);
         mockedAggregateLogs.mockResolvedValueOnce([{ start: "x", group: null, count: 2 }] as any);
 
         const first = await runAggregate({ bucket: "1m" });
         const second = await runAggregate({ bucket: "1m" });
 
-        expect(mockedAggregateLogs).toHaveBeenCalledTimes(2);
-        expect(second).not.toEqual(first);
+        expect(mockedAggregateLogs).toHaveBeenCalledOnce();
+        expect(second).toEqual(first);
     });
 
-    it("does not cache the rollup fast path (nothing to save — it's already cheap)", async () => {
-        mockedAggregateFromRollup.mockResolvedValue([]);
-        await runAggregate({ bucket: "1h", since: "2026-07-20T00:00:00Z", until: "2026-07-21T00:00:00Z" });
-        await runAggregate({ bucket: "1h", since: "2026-07-20T00:00:00Z", until: "2026-07-21T00:00:00Z" });
+    // Same reversal — the rollup path reads a handful of rows from a small
+    // table, genuinely cheap in isolation, but measured at 12.38s p95 under
+    // concurrent load purely from queuing on the replica's one core.
+    it("caches the rollup fast path too", async () => {
+        mockedAggregateFromRollup.mockResolvedValueOnce([{ start: "x", group: null, count: 1 }] as any);
+        mockedAggregateFromRollup.mockResolvedValueOnce([{ start: "x", group: null, count: 2 }] as any);
 
-        expect(mockedAggregateFromRollup).toHaveBeenCalledTimes(2);
+        const first = await runAggregate({ bucket: "1h", since: "2026-07-20T00:00:00Z", until: "2026-07-21T00:00:00Z" });
+        const second = await runAggregate({ bucket: "1h", since: "2026-07-20T00:00:00Z", until: "2026-07-21T00:00:00Z" });
+
+        expect(mockedAggregateFromRollup).toHaveBeenCalledOnce();
+        expect(second).toEqual(first);
     });
 });
 

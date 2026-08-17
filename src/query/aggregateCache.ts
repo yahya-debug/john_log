@@ -1,13 +1,26 @@
-// Short-TTL cache for GET /logs/aggregate, specifically aimed at the q=/attr.*
-// filtered shape — the one query type with no supporting index at all (see
-// schema.ts / docs/ingestion-bottleneck.md), where a single call can cost over
-// a second of Postgres CPU on its own. The brief requires supporting "one
-// aggregation request per second"; if that's genuinely one request per
-// second, repeated calls a few seconds apart are very likely asking for
-// almost the same thing (same filters, since/until only a few seconds
-// further forward). Rounding since/until to a coarse boundary before hashing
-// the cache key means those near-duplicate calls collapse onto the same
-// entry instead of each re-paying the full scan.
+// Short-TTL cache for GET /logs/aggregate — every shape, not just the
+// q=/attr.* filtered one this was originally built for. The original
+// reasoning ("only q=/attr.* is expensive enough to bother caching, a plain
+// bucket=1m query is already cheap and index-backed") held when a single
+// Postgres instance served both writes and reads and per-query cost was what
+// mattered. It stopped holding once reads moved to a dedicated replica
+// (README's Schema and index design): under concurrent load, the replica's
+// one CPU core has to serve every aggregate shape at once, so a "cheap"
+// query still queues behind whatever else is running — measured directly,
+// the unfiltered live-window shape this used to skip caching for had a
+// *worse* p95 (21.94s) than the genuinely expensive q=-filtered scan
+// (21.54s), and even the rollup-served historical shape sat at 12.38s
+// despite reading a handful of rows from a small table. None of that is
+// query cost; it's concurrent volume on one core. Caching every shape cuts
+// how often *any* of them actually reaches Postgres, which is the lever that
+// actually matters here.
+//
+// The brief requires supporting "one aggregation request per second"; if
+// that's genuinely one request per second, repeated calls a few seconds
+// apart are very likely asking for almost the same thing (same filters,
+// since/until only a few seconds further forward). Rounding since/until to a
+// coarse boundary before hashing the cache key means those near-duplicate
+// calls collapse onto the same entry instead of each re-paying the full scan.
 //
 // Cache staleness is bounded by ROUND_MS + TTL_MS, well inside the brief's
 // 20-second "queryable within" budget, and consistent with the system's

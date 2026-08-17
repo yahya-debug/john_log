@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { db } from "./db.js";
+import { executeWithReplicaFallback } from "./db.js";
 import { Env } from "../config.js";
 
 export interface PartitionStat {
@@ -42,9 +42,16 @@ export interface Stats {
 // tradeoff monitoring tools make for exactly this reason. totals.rows below
 // stays exact regardless, since it's summed from the by_level/by_service
 // GROUP BYs, which already scan the real data.
+//
+// executeWithReplicaFallback (db/db.ts), not a plain db.execute: this endpoint
+// isn't part of the required contract, but its queries (two full GROUP BYs
+// over `logs`, a min/max scan) are real read cost — no reason to send that
+// at the primary and compete with ingestion when the replica exists for
+// exactly this. Falls back to the primary automatically if the replica isn't
+// reachable, same as the required read endpoints.
 export async function getStats(): Promise<Stats> {
     const [partitionRows, levelRows, serviceRows, rangeRows, rateRows] = await Promise.all([
-        db.execute<{ name: string; bound: string | null; rows_estimate: number; size_bytes: number }>(sql`
+        executeWithReplicaFallback<{ name: string; bound: string | null; rows_estimate: number; size_bytes: number }>(sql`
             SELECT
                 c.relname AS name,
                 pg_get_expr(c.relpartbound, c.oid) AS bound,
@@ -57,20 +64,20 @@ export async function getStats(): Promise<Stats> {
             WHERE p.relname = 'logs'
             ORDER BY c.relname
         `),
-        db.execute<{ level: string; count: number }>(
+        executeWithReplicaFallback<{ level: string; count: number }>(
             sql`SELECT level, count(*)::int AS count FROM logs GROUP BY level`
         ),
-        db.execute<{ service: string; count: number }>(
+        executeWithReplicaFallback<{ service: string; count: number }>(
             sql`SELECT service, count(*)::int AS count FROM logs GROUP BY service ORDER BY count(*) DESC`
         ),
-        db.execute<{ oldest: string | null; newest: string | null }>(
+        executeWithReplicaFallback<{ oldest: string | null; newest: string | null }>(
             sql`SELECT min(timestamp) AS oldest, max(timestamp) AS newest FROM logs`
         ),
         // the outer WHERE isn't redundant with the FILTER below even though
         // it's the same bound as last_5m — it's what lets Postgres prune to
         // ~today's partition instead of scanning every partition to compute
         // a FILTER'd aggregate over the whole table
-        db.execute<{ last_1m: number; last_5m: number }>(sql`
+        executeWithReplicaFallback<{ last_1m: number; last_5m: number }>(sql`
             SELECT
                 count(*) FILTER (WHERE timestamp >= now() - interval '1 minute')::int AS last_1m,
                 count(*)::int AS last_5m
