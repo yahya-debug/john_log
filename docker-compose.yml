@@ -199,10 +199,20 @@ services:
       AGGREGATE_Q_MAX_CONCURRENT: ${AGGREGATE_Q_MAX_CONCURRENT:-}
       # replica
       READ_DB_CONNECTION: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres-replica:5432/${POSTGRES_DB:-john_log}
+    # Only waits on the primary, not postgres-replica: nothing at startup (migrations,
+    # retain()) touches the replica, and readClient (db/db.ts) connects lazily on its
+    # first real query, not at import time. Waiting on the replica's own boot chain
+    # here too — build its image, wait for the primary, run a full pg_basebackup clone,
+    # pass its healthcheck — serialized the app's own startup behind all of that, which
+    # is almost certainly why the real load generator reported "health check did not
+    # respond within 2 minutes": that's the brief's most basic requirement ("If the
+    # load generator cannot communicate with your service, the submission cannot be
+    # graded"), so this dependency was actively dangerous, not just slow. The replica
+    # still starts and catches up in the background regardless — by the time the load
+    # generator's own health polling passes and it starts sending real traffic, it's
+    # had that same window to finish its initial clone.
     depends_on:
       postgres:
-        condition: service_healthy
-      postgres-replica:
         condition: service_healthy
     deploy:
       resources:
