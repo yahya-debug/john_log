@@ -614,6 +614,31 @@ The actual grading tool is [k6](https://k6.io/), not a hand-rolled script — th
   actual targets (`accepted_logs >= 95% of TARGET_RATE * DURATION_SEC`, each aggregate shape's p95 `<1000ms`,
   zero ingest errors).
 
+### `npm run loadtest:boot-check` — does the stack even start?
+
+None of the k6 scenarios above test this: they all assume the stack is already up and healthy before they
+start pacing requests. A real submission was rejected with *"Service failed to start: health check did not
+respond within 2 minutes"* — a fresh `docker compose up` on the grading host never got `GET /health` to `200`
+in time, so the run never got graded at all, regardless of how good the actual numbers would have been.
+`loadtest/k6/boot-check.sh` reproduces that check directly: `docker compose down -v && up --build` (a real
+grading run starts from nothing, not a warmed dev volume) followed by polling `GET /health` against the same
+120-second budget the real grader enforced, failing loudly if it's exceeded.
+
+**What actually caused it, for the record:** adding the read replica (see [Schema and index
+design](#schema-and-index-design)) made `app` wait on *both* `postgres` and `postgres-replica` reaching
+healthy before starting — serializing the app's own boot behind the replica's full image build, wait-for-
+primary, and `pg_basebackup` clone. Fixed by only depending on the primary in `docker-compose.yml`'s `app`
+service, since nothing at startup (migrations, `retain()`) touches the replica — `readClient` (`src/db/db.ts`)
+connects lazily on its first real query, not at import time.
+
+**An honest limitation of this check:** on a fast dev machine with cached Docker layers and an empty database
+to clone, the whole chain — replica included — completes in seconds, so reintroducing the exact bug that broke
+the real submission doesn't reliably fail this check locally (verified directly: it passed in ~11s with the
+broken `depends_on` reinstated). The real grading host was evidently slower or uncached enough to cross 2
+minutes; this host isn't. The check still does its actual job — it measures real boot time against the same
+absolute budget the grader enforces, on whatever host it's run on — it just isn't a guaranteed local repro of
+a regression that's fundamentally about *host speed*, not application logic.
+
 ### Local diagnostics beyond the graded scenario (`loadtest:k6:stress`/`:spike`/`:breakpoint`)
 
 The grading spec confirmed for this project is exactly the Load scenario above (`k6`, 15,000 logs/sec, 120s) —
