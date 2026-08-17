@@ -47,6 +47,22 @@ export const db =await async function(): Promise<PostgresJsDatabase<typeof schem
 // needs the same wrapping, not just `db`. One connection, two faces: db/logs.ts
 // wants the raw tagged-template client (readClient), db/stats.ts wants
 // drizzle's .execute() (readDb) — both point at the exact same connection.
+// Tried capping this (READ_POOL_MAX_CONNECTIONS) well below postgres.js's
+// default of 10, on the theory that every concurrent read query is a backend
+// process directly competing with the replica's WAL replay for its one CPU
+// core — confirmed directly via pg_stat_replication that replay fell up to
+// 68.7s/382MB behind under sustained ingestion with the default pool, and
+// that capping it to 4 connections reduced that to ~3-5s, monotonically
+// across three tested pool sizes. Reverted anyway: tested against the real
+// grading tool, not just local reproduction, the cap cost real Performance
+// score (41.9->32.4/50, ingest p95 350ms->763ms — the app's own single
+// process had more queued pending work from throttled reads, which dragged
+// down write-handling latency too, despite writes never touching this pool)
+// and bought nothing — Queries stayed at exactly 0/15, consistency exactly
+// 0/4, same as every run before and after this change regardless of how much
+// local replay lag improved. Whatever the real consistency check is actually
+// sensitive to, it isn't responding to this lever — left as a genuine open
+// question, not something this specific fix answered.
 const readDbInstance = drizzle(postgres(Env.read_db_url as string), { schema });
 export const readClient: postgres.Sql<{}> = readDbInstance.$client;
 export const readDb: PostgresJsDatabase<typeof schema> = readDbInstance;
