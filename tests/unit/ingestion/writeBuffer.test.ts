@@ -3,17 +3,19 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 vi.mock("../../../src/db/logs.js", () => ({
     insertLogs: vi.fn(),
     upsertHourlyCounts: vi.fn(),
+    upsertMinuteCounts: vi.fn(),
     deadLetterEntries: vi.fn(),
 }));
 vi.mock("../../../src/db/db.js", () => ({ db: { $client: { begin: vi.fn() } } }));
 
-import { insertLogs, upsertHourlyCounts, deadLetterEntries } from "../../../src/db/logs.js";
+import { insertLogs, upsertHourlyCounts, upsertMinuteCounts, deadLetterEntries } from "../../../src/db/logs.js";
 import { db } from "../../../src/db/db.js";
 import { pushLogs, flushNow } from "../../../src/ingestion/writeBuffer.js";
 import type { ValidatedLog } from "../../../src/types/log.js";
 
 const mockedInsertLogs = vi.mocked(insertLogs);
 const mockedUpsertHourlyCounts = vi.mocked(upsertHourlyCounts);
+const mockedUpsertMinuteCounts = vi.mocked(upsertMinuteCounts);
 const mockedDeadLetterEntries = vi.mocked(deadLetterEntries);
 const mockedBegin = vi.mocked(db.$client.begin);
 
@@ -24,6 +26,7 @@ function entry(overrides: Partial<ValidatedLog> = {}): ValidatedLog {
 beforeEach(() => {
     mockedInsertLogs.mockReset().mockResolvedValue(undefined as any);
     mockedUpsertHourlyCounts.mockReset().mockResolvedValue(undefined as any);
+    mockedUpsertMinuteCounts.mockReset().mockResolvedValue(undefined as any);
     mockedDeadLetterEntries.mockReset().mockResolvedValue(undefined);
     // Mirrors db.$client.begin's real contract: run the callback against a
     // (fake) transaction-scoped client, propagating whatever it throws.
@@ -64,6 +67,7 @@ describe("writeBuffer flush", () => {
 
         expect(mockedInsertLogs).toHaveBeenCalledOnce();
         expect(mockedUpsertHourlyCounts).toHaveBeenCalledOnce();
+        expect(mockedUpsertMinuteCounts).toHaveBeenCalledOnce();
         expect(mockedDeadLetterEntries).not.toHaveBeenCalled();
     });
 

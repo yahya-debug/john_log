@@ -25,10 +25,17 @@
 // fallback never triggered, every such read 500'd. 57P01/57P02 (admin/crash
 // shutdown) are the same shape for the same reason: a replica that's down
 // for any reason should degrade to the primary, not fail the request.
+// 57014 (query_canceled) is what Postgres returns when db.ts's
+// statement_timeout fires — a query that connected fine but didn't return in
+// time. Same "this instance can't serve queries right now" shape as the
+// others: without it here, the timeout cuts the hang short but the resulting
+// error just rethrows as a 500 instead of retrying against the primary,
+// defeating the point of adding the timeout in the first place.
 const CONNECTION_ERROR_CODES = new Set([
     "CONNECTION_CLOSED", "CONNECTION_DESTROYED", "CONNECT_TIMEOUT",
     "ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ECONNRESET",
     "57P01", "57P02", "57P03", // Postgres: admin_shutdown, crash_shutdown, cannot_connect_now
+    "57014", // Postgres: query_canceled (our own statement_timeout firing)
 ]);
 
 // Checks err.code directly (postgres.js's raw tagged-template calls expose it
@@ -50,7 +57,7 @@ export async function withFallback<T>(primary: () => Promise<T>, fallback: () =>
         return await primary();
     } catch (err) {
         if (!isConnectionError(err)) throw err;
-        console.warn(`read replica unreachable, falling back to primary: ${(err as Error).message}`);
+        console.warn(`read replica unreachable or timed out, falling back to primary: ${(err as Error).message}`);
         return fallback();
     }
 }

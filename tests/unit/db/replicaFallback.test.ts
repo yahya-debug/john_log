@@ -6,7 +6,7 @@ function connectionError(code: string) {
 }
 
 describe("isConnectionError", () => {
-    it.each(["CONNECTION_CLOSED", "CONNECTION_DESTROYED", "CONNECT_TIMEOUT", "ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "57P01", "57P02", "57P03"])(
+    it.each(["CONNECTION_CLOSED", "CONNECTION_DESTROYED", "CONNECT_TIMEOUT", "ECONNREFUSED", "ENOTFOUND", "ETIMEDOUT", "ECONNRESET", "57P01", "57P02", "57P03", "57014"])(
         "treats %s as a connection error",
         (code) => {
             expect(isConnectionError(connectionError(code))).toBe(true);
@@ -24,6 +24,19 @@ describe("isConnectionError", () => {
             code: "57P03",
             severity: "FATAL",
             routine: "ProcessStartupPacket",
+        });
+        expect(isConnectionError(err)).toBe(true);
+    });
+
+    // db.ts sets statement_timeout on the read-replica client so a stuck query
+    // can't hang a request indefinitely; when it fires, Postgres returns this
+    // code (query_canceled) rather than a network-level error. Without it in
+    // the recognized set, the timeout would cut the hang short but the
+    // resulting error would just 500 instead of retrying against the primary.
+    it("treats a statement_timeout cancellation (57014) as a connection error", () => {
+        const err = Object.assign(new Error("canceling statement due to statement timeout"), {
+            code: "57014",
+            severity: "ERROR",
         });
         expect(isConnectionError(err)).toBe(true);
     });

@@ -111,9 +111,9 @@ async function main() {
 
     // This script inserts directly via drizzle, bypassing the write buffer entirely —
     // so unlike normal ingestion (src/ingestion/writeBuffer.ts) or the admin backfill
-    // route, nothing has kept logs_hourly_counts (GET /logs/aggregate's 1h/1d rollup —
-    // see src/db/logs.ts) in sync as these rows went in. A one-time recompute straight
-    // from `logs` is the authoritative fix — safe to run repeatedly (DO UPDATE SET
+    // route, nothing has kept logs_hourly_counts/logs_minute_counts (GET /logs/aggregate's
+    // rollups — see src/db/logs.ts) in sync as these rows went in. A one-time recompute
+    // straight from `logs` is the authoritative fix — safe to run repeatedly (DO UPDATE SET
     // count = excluded.count overwrites rather than adds, so re-seeding never double-counts).
     console.log("recomputing logs_hourly_counts rollup from seeded data...");
     await db.execute(sql`
@@ -122,6 +122,18 @@ async function main() {
         FROM logs
         GROUP BY 1, 2, 3
         ON CONFLICT (hour, service, level) DO UPDATE SET count = excluded.count
+    `);
+
+    // Same reasoning, same fix, for logs_minute_counts (the 1m/5m rollup —
+    // see schema.ts). Missing this would leave any bucket=1m/5m aggregate
+    // query over the seeded range silently undercounting.
+    console.log("recomputing logs_minute_counts rollup from seeded data...");
+    await db.execute(sql`
+        INSERT INTO logs_minute_counts (minute, service, level, count)
+        SELECT date_trunc('minute', timestamp), service, level, COUNT(*)
+        FROM logs
+        GROUP BY 1, 2, 3
+        ON CONFLICT (minute, service, level) DO UPDATE SET count = excluded.count
     `);
 
     console.log(`done in ${((Date.now() - start) / 1000).toFixed(1)}s total`);

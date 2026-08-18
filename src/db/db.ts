@@ -63,7 +63,21 @@ export const db =await async function(): Promise<PostgresJsDatabase<typeof schem
 // local replay lag improved. Whatever the real consistency check is actually
 // sensitive to, it isn't responding to this lever — left as a genuine open
 // question, not something this specific fix answered.
-const readDbInstance = drizzle(postgres(Env.read_db_url as string), { schema });
+// connect_timeout/statement_timeout: without these, postgres.js has no bound
+// on how long a read waits for a connection or for a query to return. A
+// replica that's slow, contended, or briefly unreachable then just hangs the
+// request indefinitely instead of throwing — which means withReplicaFallback
+// below never gets a chance to retry against the primary, since it only
+// reacts to a thrown error, not a stall. 5s each: comfortably under the
+// brief's 20s "queryable within" budget, generous for a legitimately busy
+// but healthy replica, far short of leaving a request to hang until the
+// caller's own timeout fires instead of ours.
+const readDbInstance = drizzle(postgres(Env.read_db_url as string, {
+    connect_timeout: 5,
+    connection: {
+        statement_timeout: 5000,
+    },
+}), { schema });
 export const readClient: postgres.Sql<{}> = readDbInstance.$client;
 export const readDb: PostgresJsDatabase<typeof schema> = readDbInstance;
 

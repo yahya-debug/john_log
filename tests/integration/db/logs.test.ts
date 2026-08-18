@@ -1,5 +1,5 @@
 import { describe, expect, it, afterAll, afterEach, beforeAll } from "vitest";
-import { aggregateFromRollup, aggregateLogs, deadLetterEntries, deleteDeadLetter, insertLogs, listDeadLetters, queryLogs, upsertHourlyCounts } from "../../../src/db/logs.js";
+import { aggregateFromMinuteRollup, aggregateFromRollup, aggregateLogs, deadLetterEntries, deleteDeadLetter, insertLogs, listDeadLetters, queryLogs, upsertHourlyCounts, upsertMinuteCounts } from "../../../src/db/logs.js";
 import { combineConditions, commandCondition } from "../../../src/query/filters.js";
 import type { ValidatedLog } from "../../../src/types/log.js";
 import { uniqueService, deleteService } from "../helpers.js";
@@ -252,6 +252,81 @@ describe("upsertHourlyCounts / aggregateFromRollup", () => {
 
     it("filters by level", async () => {
         const rows = await aggregateFromRollup({ service, level: "debug", since, until }, "1h", null);
+        expect(rows).toHaveLength(0);
+    });
+});
+
+describe("upsertMinuteCounts / aggregateFromMinuteRollup", () => {
+    const service = uniqueService("minute-rollup");
+    afterAll(() => deleteService(service));
+
+    const minute = new Date(now.getTime());
+    minute.setUTCSeconds(0, 0);
+    const since = minute;
+    const until = new Date(minute.getTime() + 60 * 1000);
+
+    it("increments (not overwrites) count across repeated calls for the same minute/service/level", async () => {
+        await upsertMinuteCounts([
+            { timestamp: minute.toISOString(), level: "error", service, message: "m" },
+            { timestamp: minute.toISOString(), level: "error", service, message: "m" },
+        ]);
+        await upsertMinuteCounts([
+            { timestamp: new Date(minute.getTime() + 5000).toISOString(), level: "error", service, message: "m" },
+        ]);
+
+        const rows = await aggregateFromMinuteRollup({ service, since, until }, "1m", null);
+        expect(rows).toHaveLength(1);
+        expect(rows[0].count).toBe(3);
+    });
+
+    it("matches aggregateLogs's result for the same data, filters, and bucket", async () => {
+        const rollupService = uniqueService("minute-rollup-parity");
+        const entries: ValidatedLog[] = [
+            { timestamp: minute.toISOString(), level: "error", service: rollupService, message: "m1" },
+            { timestamp: new Date(minute.getTime() + 1000).toISOString(), level: "error", service: rollupService, message: "m2" },
+            { timestamp: new Date(minute.getTime() + 2000).toISOString(), level: "warn", service: rollupService, message: "m3" },
+        ];
+        await insertLogs(entries);
+        await upsertMinuteCounts(entries);
+
+        const liveRows = await aggregateLogs(
+            combineConditions(commandCondition({ service: rollupService, since, until })),
+            "1 minute",
+            "level"
+        );
+        const rollupRows = await aggregateFromMinuteRollup({ service: rollupService, since, until }, "1m", "level");
+
+        const byGroupLive = Object.fromEntries(liveRows.map((r) => [r.group, r.count]));
+        const byGroupRollup = Object.fromEntries(rollupRows.map((r) => [r.group, r.count]));
+        expect(byGroupRollup).toEqual(byGroupLive);
+        expect(byGroupRollup).toEqual({ error: 2, warn: 1 });
+
+        await deleteService(rollupService);
+    });
+
+    it("re-buckets to 5m by summing across five one-minute buckets", async () => {
+        const fiveMinService = uniqueService("minute-rollup-5m");
+        const windowStart = new Date(minute.getTime());
+        windowStart.setUTCMinutes(Math.floor(windowStart.getUTCMinutes() / 5) * 5, 0, 0);
+
+        await upsertMinuteCounts([
+            { timestamp: windowStart.toISOString(), level: "info", service: fiveMinService, message: "m" },
+            { timestamp: new Date(windowStart.getTime() + 3 * 60 * 1000).toISOString(), level: "info", service: fiveMinService, message: "m" },
+        ]);
+
+        const rows = await aggregateFromMinuteRollup(
+            { service: fiveMinService, since: windowStart, until: new Date(windowStart.getTime() + 5 * 60 * 1000) },
+            "5m",
+            null
+        );
+        expect(rows).toHaveLength(1);
+        expect(rows[0].count).toBe(2);
+
+        await deleteService(fiveMinService);
+    });
+
+    it("filters by level", async () => {
+        const rows = await aggregateFromMinuteRollup({ service, level: "debug", since, until }, "1m", null);
         expect(rows).toHaveLength(0);
     });
 });

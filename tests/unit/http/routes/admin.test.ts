@@ -7,6 +7,7 @@ import { EventEmitter } from "node:events";
 vi.mock("../../../../src/db/logs.js", () => ({
     insertLogs: vi.fn(),
     upsertHourlyCounts: vi.fn(),
+    upsertMinuteCounts: vi.fn(),
     listDeadLetters: vi.fn(),
     deleteDeadLetter: vi.fn(),
 }));
@@ -15,7 +16,7 @@ vi.mock("../../../../src/db/stats.js", () => ({ getStats: vi.fn() }));
 vi.mock("../../../../src/db/db.js", () => ({ db: { $client: { begin: vi.fn() } } }));
 vi.mock("../../../../src/ingestion/writeBuffer.js", () => ({ tailEmitter: new EventEmitter() }));
 
-import { insertLogs, upsertHourlyCounts, listDeadLetters, deleteDeadLetter } from "../../../../src/db/logs.js";
+import { insertLogs, upsertHourlyCounts, upsertMinuteCounts, listDeadLetters, deleteDeadLetter } from "../../../../src/db/logs.js";
 import { backfillPartitionForDate } from "../../../../src/retention/partitions.js";
 import { getStats } from "../../../../src/db/stats.js";
 import { db } from "../../../../src/db/db.js";
@@ -26,6 +27,7 @@ import { Env } from "../../../../src/config.js";
 
 const mockedInsertLogs = vi.mocked(insertLogs);
 const mockedUpsertHourlyCounts = vi.mocked(upsertHourlyCounts);
+const mockedUpsertMinuteCounts = vi.mocked(upsertMinuteCounts);
 const mockedBackfill = vi.mocked(backfillPartitionForDate);
 const mockedGetStats = vi.mocked(getStats);
 const mockedListDeadLetters = vi.mocked(listDeadLetters);
@@ -47,6 +49,7 @@ function buildApp() {
 beforeEach(() => {
     mockedInsertLogs.mockReset();
     mockedUpsertHourlyCounts.mockReset();
+    mockedUpsertMinuteCounts.mockReset();
     mockedBackfill.mockReset();
     mockedBackfill.mockResolvedValue({ partition: "logs_x", moved: 0 });
     mockedGetStats.mockReset();
@@ -88,6 +91,7 @@ describe("POST /admin/logs/backfill", () => {
         expect(mockedBackfill).toHaveBeenCalledWith(new Date(timestamp.slice(0, 10)));
         expect(mockedInsertLogs).toHaveBeenCalledOnce();
         expect(mockedUpsertHourlyCounts).toHaveBeenCalledOnce();
+        expect(mockedUpsertMinuteCounts).toHaveBeenCalledOnce();
     });
 
     it("discards (doesn't insert) an entry older than the retention window, without calling backfill for it", async () => {
@@ -100,6 +104,7 @@ describe("POST /admin/logs/backfill", () => {
         expect(mockedBackfill).not.toHaveBeenCalled();
         expect(mockedInsertLogs).not.toHaveBeenCalled();
         expect(mockedUpsertHourlyCounts).not.toHaveBeenCalled();
+        expect(mockedUpsertMinuteCounts).not.toHaveBeenCalled();
     });
 
     it("still rejects entries that fail basic validation (e.g. bad level), even though allowStale is set", async () => {
@@ -177,6 +182,7 @@ describe("POST /admin/dead-letter/replay", () => {
         mockedListDeadLetters.mockResolvedValue([row("1"), row("2")] as any);
         mockedInsertLogs.mockResolvedValue(undefined as any);
         mockedUpsertHourlyCounts.mockResolvedValue(undefined as any);
+        mockedUpsertMinuteCounts.mockResolvedValue(undefined as any);
 
         const res = await request(buildApp()).post("/admin/dead-letter/replay");
 
@@ -186,6 +192,7 @@ describe("POST /admin/dead-letter/replay", () => {
         expect(mockedDeleteDeadLetter).toHaveBeenCalledWith("2");
         expect(mockedInsertLogs).toHaveBeenCalledTimes(2);
         expect(mockedUpsertHourlyCounts).toHaveBeenCalledTimes(2);
+        expect(mockedUpsertMinuteCounts).toHaveBeenCalledTimes(2);
     });
 
     it("leaves a row queued (doesn't delete it) if replay fails again, and keeps processing the rest", async () => {
@@ -194,6 +201,7 @@ describe("POST /admin/dead-letter/replay", () => {
             .mockRejectedValueOnce(new Error("still broken"))
             .mockResolvedValueOnce(undefined as any);
         mockedUpsertHourlyCounts.mockResolvedValue(undefined as any);
+        mockedUpsertMinuteCounts.mockResolvedValue(undefined as any);
 
         const res = await request(buildApp()).post("/admin/dead-letter/replay");
 

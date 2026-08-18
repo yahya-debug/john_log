@@ -1,17 +1,39 @@
-import { aggregateFromRollup, aggregateLogs } from "../db/logs.js";
+import { aggregateFromMinuteRollup, aggregateFromRollup, aggregateLogs } from "../db/logs.js";
 import { AggQueryPar, BUCKET_INTERVALS } from "../types/QueryParams.js";
 import { combineConditions, commandCondition } from "./filters.js";
 import { withAggregateCache } from "./aggregateCache.js";
+import { queryLive } from "./liveAggregate.js";
 
-// Only bucket=1h/1d, with no q=/attr.* filter, can be served from the pre-aggregated
+// bucket=1m, no q=/attr.* filter — the one shape liveAggregate.ts actually
+// tracks (see its header comment: q=/attr.* have an unbounded value space
+// and are never counted there, only service/level/since/until are).
+function canUseLive(query: any): boolean {
+    return (
+        query.bucket === "1m"
+        && !query.q
+        && !(query.attr && Object.keys(query.attr).length > 0)
+    );
+}
+
+// bucket=1h/1d, with no q=/attr.* filter, served from the pre-aggregated
 // logs_hourly_counts rollup (see src/db/schema.ts and src/db/logs.ts's
-// aggregateFromRollup for why those two filters specifically can't be pre-aggregated —
-// their value space is unbounded, unlike service/level). Everything else — finer
-// buckets (1m/5m), or any q=/attr.<key> filter — falls back to the live scan over
-// `logs`, unchanged from before this rollup existed.
-function canUseRollup(query: any): boolean {
+// aggregateFromRollup for why q=/attr.* specifically can't be pre-aggregated —
+// their value space is unbounded, unlike service/level).
+function canUseHourlyRollup(query: any): boolean {
     return (
         (query.bucket === "1h" || query.bucket === "1d")
+        && !query.q
+        && !(query.attr && Object.keys(query.attr).length > 0)
+    );
+}
+
+// Same idea, one level finer — bucket=1m/5m with no q=/attr.* filter, served
+// from logs_minute_counts (see schema.ts's logsMinuteCounts and
+// aggregateFromMinuteRollup). Any q=/attr.<key> filter still falls all the
+// way back to the live scan over `logs`, same as the hourly path.
+function canUseMinuteRollup(query: any): boolean {
+    return (
+        (query.bucket === "1m" || query.bucket === "5m")
         && !query.q
         && !(query.attr && Object.keys(query.attr).length > 0)
     );
@@ -32,9 +54,37 @@ function canUseRollup(query: any): boolean {
 // which is the lever that matters when the bottleneck is concurrent volume
 // on a single core, not any one query's own cost.
 export async function runAggregate(query: any) {
-    if (canUseRollup(query)) {
+    if (canUseLive(query)) {
+        const liveBuckets = queryLive({
+            since: new Date(query.since),
+            until: new Date(query.until),
+            service: query.service,
+            level: query.level,
+            groupBy: query.group_by,
+        });
+        // null means "outside what's retained/known" (see liveAggregate.ts's
+        // queryLive) — not "no results". A real [] (an eligible, in-window
+        // query that just matched nothing) short-circuits here same as any
+        // other result. Deliberately skips withAggregateCache: this is
+        // already faster and fresher than caching could make the DB path.
+        if (liveBuckets !== null) return { buckets: liveBuckets };
+    }
+
+    if (canUseHourlyRollup(query)) {
         const compute = async () => {
             const buckets = await aggregateFromRollup(
+                { service: query.service, level: query.level, since: new Date(query.since), until: new Date(query.until) },
+                query.bucket,
+                query.group_by
+            );
+            return { buckets };
+        };
+        return withAggregateCache(query, compute);
+    }
+
+    if (canUseMinuteRollup(query)) {
+        const compute = async () => {
+            const buckets = await aggregateFromMinuteRollup(
                 { service: query.service, level: query.level, since: new Date(query.since), until: new Date(query.until) },
                 query.bucket,
                 query.group_by
