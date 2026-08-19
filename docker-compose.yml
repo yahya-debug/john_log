@@ -85,11 +85,6 @@ services:
                                    # same reasoning, staying proportionate rather than assuming
                                    # unlimited headroom on infrastructure this project doesn't
                                    # control or have visibility into.
-      - -c
-      - wal_level=replica          # lets a replica reconstruct every change from the WAL stream
-      - -c
-      - wal_keep_size=512MB        # how much history Postgres keeps so the replica can catch up
-                                   # if it falls behind, instead of needing a full re-copy
     environment:
       # Defaults ($VAR:-default) so a plain `docker compose up`, with no .env at all,
       # still boots — required by the brief's "zero configuration" contract. .env
@@ -97,13 +92,10 @@ services:
       POSTGRES_USER: ${POSTGRES_USER:-postgres}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
       POSTGRES_DB: ${POSTGRES_DB:-john_log}
-      REPLICATION_USER: ${REPLICATION_USER:-replicator}
-      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-replicator_pw}
     ports:
       - "5433:5432" # 33 because on my own machine postgres is working and using this port
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-john_log}"]
       interval: 5s
@@ -115,69 +107,6 @@ services:
           cpus: "1"
           memory: 1024M
 
-  postgres-replica:
-    build:
-      context: .
-      dockerfile: Dockerfile.replica
-    # Was running on stock Postgres defaults before this — only hot_standby_feedback
-    # was set. That's a real gap, not a neutral default: effective_cache_size defaults
-    # to 4GB on a container capped at 512MB (actively misleads the planner about how
-    # much page cache is actually available), and max_parallel_workers_per_gather
-    # never inherited the fix that measurably helped the primary's aggregate queries
-    # (README's Measured performance results: 1134ms->306ms) — the replica has the
-    # exact same 1-real-CPU constraint the primary does, so "parallel" workers here
-    # are pure Gather-coordination overhead too, not real parallelism.
-    command:
-      - postgres
-      - -c
-      - hot_standby_feedback=on   # tells the primary not to vacuum away rows this
-                                   # replica's queries might still be reading — without
-                                   # it, a read here can get killed mid-flight by the
-                                   # primary's own cleanup (see db/db.ts's comment on
-                                   # the read connection, and the crash this caused
-                                   # before finalErrorHandler existed).
-      - -c
-      - shared_buffers=128MB      # ~25% of the replica's real 512MB — same ratio the
-                                   # primary uses against its 1GB, not a separate guess.
-      - -c
-      - effective_cache_size=384MB # ~75% of 512MB, same ratio as the primary's 768MB/1GB —
-                                   # was defaulting to 4GB, 8x more than this container
-                                   # actually has, which is worse than not setting it at
-                                   # all: a wrong-but-confident planner hint.
-      - -c
-      - work_mem=16MB             # same value as the primary — this instance now runs
-                                   # every aggregate shape (live/historical/q=) that used
-                                   # to be split across primary+cache, so its HashAggregate
-                                   # cost is real, not incidental.
-      - -c
-      - max_parallel_workers_per_gather=0 # same reasoning as the primary's identical
-                                   # setting (docker-compose.yml above): 1 real CPU means
-                                   # parallel workers add coordination cost with no actual
-                                   # parallelism to show for it.
-    environment:
-      PGDATA: /var/lib/postgresql/data
-      PRIMARY_HOST: postgres
-      REPLICATION_USER: ${REPLICATION_USER:-replicator}
-      REPLICATION_PASSWORD: ${REPLICATION_PASSWORD:-replicator_pw}
-      POSTGRES_USER: ${POSTGRES_USER:-postgres}
-    ports:
-      - "5434:5432"
-    volumes:
-      - pgdata_replica:/var/lib/postgresql/data
-    depends_on:
-      postgres:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
-      interval: 5s
-      timeout: 5s
-      retries: 30
-      start_period: 20s
-    deploy:
-      resources:
-        limits:
-          cpus: "1"
-          memory: 512M
   app:
     build: .
     command: ["node", "--max-old-space-size=176", "dist/index.js"]
@@ -197,20 +126,6 @@ services:
       # Unset by default => disabled (see src/config.ts) — optional backpressure for
       # GET /logs/aggregate?q=..., off unless explicitly configured.
       AGGREGATE_Q_MAX_CONCURRENT: ${AGGREGATE_Q_MAX_CONCURRENT:-}
-      # replica
-      READ_DB_CONNECTION: postgres://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres-replica:5432/${POSTGRES_DB:-john_log}
-    # Only waits on the primary, not postgres-replica: nothing at startup (migrations,
-    # retain()) touches the replica, and readClient (db/db.ts) connects lazily on its
-    # first real query, not at import time. Waiting on the replica's own boot chain
-    # here too — build its image, wait for the primary, run a full pg_basebackup clone,
-    # pass its healthcheck — serialized the app's own startup behind all of that, which
-    # is almost certainly why the real load generator reported "health check did not
-    # respond within 2 minutes": that's the brief's most basic requirement ("If the
-    # load generator cannot communicate with your service, the submission cannot be
-    # graded"), so this dependency was actively dangerous, not just slow. The replica
-    # still starts and catches up in the background regardless — by the time the load
-    # generator's own health polling passes and it starts sending real traffic, it's
-    # had that same window to finish its initial clone.
     depends_on:
       postgres:
         condition: service_healthy
@@ -222,4 +137,3 @@ services:
 
 volumes:
   pgdata:
-  pgdata_replica:

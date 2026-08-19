@@ -1,6 +1,6 @@
 import type postgres from "postgres";
 import { Level, ValidatedLog } from "../types/log.js";
-import { db, withReplicaFallback } from "./db.js";
+import { db } from "./db.js";
 
 // Accepts an optional transaction-scoped client so callers (writeBuffer.ts) can run
 // the raw insert and the rollup upsert (upsertHourlyCounts, below) as one atomic unit
@@ -179,16 +179,14 @@ export async function deleteDeadLetter(id: string): Promise<void> {
     await db.$client`DELETE FROM logs_dead_letter WHERE id = ${id}`;
 }
 
-// GET /logs reads from the replica via withReplicaFallback (db/db.ts) — see
-// its comment there for what happens if the replica is unreachable.
 export async function queryLogs(whereClause: postgres.Fragment, limit: number) {
-    return withReplicaFallback((client) => client<LogRow[]>`
+    return sql<LogRow[]>`
         SELECT id, timestamp, level, service, message, attributes
         FROM logs
         ${whereClause}
         ORDER BY timestamp DESC, id DESC
         LIMIT ${limit}
-    `);
+    `;
 }
 
 // `start`/`group` are aliased explicitly so GROUP BY / ORDER BY can reference the output
@@ -198,8 +196,7 @@ export async function aggregateLogs(whereClause: postgres.Fragment, bucket_size:
     // (query/validate.ts's isValidGroupBy) to only ever be 'service' or 'level'.
     const groupColumn = group ? sql(group) : sql`NULL`;
 
-    // GET /logs/aggregate reads from the replica too — same withReplicaFallback.
-    const rows = await withReplicaFallback((client) => client<AggregateRow[]>`
+    const rows = await sql<AggregateRow[]>`
         SELECT
             date_bin(${bucket_size}::interval, timestamp, TIMESTAMPTZ '2000-01-01') AS start,
             ${groupColumn} AS "group",
@@ -208,7 +205,7 @@ export async function aggregateLogs(whereClause: postgres.Fragment, bucket_size:
         ${whereClause}
         GROUP BY ${group ? sql`start, "group"` : sql`start`}
         ORDER BY start
-    `);
+    `;
 
     return rows.map((r) => ({
         start: new Date(r.start).toISOString(),
@@ -248,8 +245,7 @@ export async function aggregateFromRollup(
         : sql("hour");
     const groupColumn = group ? sql(group) : sql`NULL`;
 
-    // Same reasoning as queryLogs/aggregateLogs above.
-    const rows = await withReplicaFallback((client) => client<AggregateRow[]>`
+    const rows = await sql<AggregateRow[]>`
         SELECT
             ${bucketing} AS start,
             ${groupColumn} AS "group",
@@ -260,7 +256,7 @@ export async function aggregateFromRollup(
             ${filters.level ? sql`AND level = ${filters.level}` : sql``}
         GROUP BY ${group ? sql`start, "group"` : sql`start`}
         ORDER BY start
-    `);
+    `;
 
     return rows.map((r) => ({
         start: new Date(r.start).toISOString(),
@@ -287,7 +283,7 @@ export async function aggregateFromMinuteRollup(
         : sql("minute");
     const groupColumn = group ? sql(group) : sql`NULL`;
 
-    const rows = await withReplicaFallback((client) => client<AggregateRow[]>`
+    const rows = await sql<AggregateRow[]>`
         SELECT
             ${bucketing} AS start,
             ${groupColumn} AS "group",
@@ -298,7 +294,7 @@ export async function aggregateFromMinuteRollup(
             ${filters.level ? sql`AND level = ${filters.level}` : sql``}
         GROUP BY ${group ? sql`start, "group"` : sql`start`}
         ORDER BY start
-    `);
+    `;
 
     return rows.map((r) => ({
         start: new Date(r.start).toISOString(),

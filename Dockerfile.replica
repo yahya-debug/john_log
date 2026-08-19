@@ -1,6 +1,0 @@
-# build a second postgres container, using the normal postgres image, but runs before postgres, so postgres sees this when start and follows the primary
-FROM postgres:16
-COPY db/replica-entrypoint.sh /usr/local/bin/replica-entrypoint.sh
-RUN chmod +x /usr/local/bin/replica-entrypoint.sh
-ENTRYPOINT ["replica-entrypoint.sh"]
-CMD ["postgres"]

@@ -15,16 +15,11 @@ shift
 
 APP_ID=$(docker compose ps -q app)
 PG_ID=$(docker compose ps -q postgres)
-REPLICA_ID=$(docker compose ps -q postgres-replica 2>/dev/null || true)
 if [[ -z "$APP_ID" || -z "$PG_ID" ]]; then
     echo "app/postgres containers not found — run 'docker compose up' first" >&2
     exit 1
 fi
-# Optional: only present if docker-compose.yml defines postgres-replica and it's
-# running. Included so the resource summary shows whether read/write splitting
-# actually moved read load off the primary, not just app/primary CPU as before.
 STATS_TARGETS=("$APP_ID" "$PG_ID")
-[[ -n "$REPLICA_ID" ]] && STATS_TARGETS+=("$REPLICA_ID")
 
 STATS_FILE=$(mktemp)
 SAMPLER_PID=""

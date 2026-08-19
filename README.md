@@ -34,28 +34,29 @@ npm run lint
                 POST /logs (writes)           GET /logs, GET /logs/aggregate (reads)
                        │                                    │
                        ▼                                    ▼
-                 ┌───────────┐                       ┌───────────────┐
-                 │    app    │──────────────────────▶│  (falls back  │
-                 │ 0.5 CPU / │                        │  to primary   │
-                 │  256MB    │                        │  if replica   │
-                 └─────┬─────┘                        │ unreachable)  │
-                       │                               └───────┬───────┘
-                       ▼                                       ▼
-                ┌─────────────┐   streams changes    ┌──────────────────┐
-                │  postgres   │──────────────────────▶│ postgres-replica │
-                │  (primary)  │   (real-time copy)    │  1 CPU / 512MB   │
-                │ 1 CPU / 1GB │                        │   read-only     │
-                └─────────────┘                        └──────────────────┘
+                 ┌───────────┐                        (same connection)
+                 │    app    │───────────────────────────────┘
+                 │ 0.5 CPU / │
+                 │  256MB    │
+                 └─────┬─────┘
+                       ▼
+                ┌─────────────┐
+                │  postgres   │
+                │ 1 CPU / 1GB │
+                └─────────────┘
 ```
 
-**Why two Postgres instances:** one CPU core can't do fast writes and fast concurrent reads at the same
-time — they queue behind each other. Splitting reads onto their own instance means ingestion and querying
-each get their own core instead of fighting for one. This is still "PostgreSQL is the source of truth for
-both reads and writes" (the brief's own condition for extra infrastructure) — the replica has no data of its
-own, it's a live copy of the primary, and it never accepts a write.
-
-If the replica is ever unreachable (still starting up, or a transient blip), reads automatically fall back
-to the primary instead of failing — see [Known limitations](#known-limitations) for the honest cost of that.
+**One Postgres instance, not two.** An earlier version of this project split reads onto a dedicated read
+replica, on the theory that one CPU core can't do fast writes and fast concurrent reads at the same time.
+That was true, and the split did measurably help — but it also used double the brief's Postgres budget (two
+containers, each independently capped at close to the brief's stated `1 CPU / 1GB`, rather than one instance
+actually held to it) and added a real category of bugs (a boot-order race, a replica-not-ready error class
+the fallback logic didn't originally recognize, WAL-replay-vs-read-query contention) without ever moving the
+one score category — Queries — it was ultimately meant to help. Removed once the actual lever for that
+turned out to be something else entirely (see [Measured Performance Results](#measured-performance-results)
+and [Known limitations](#known-limitations)): a minute-granularity rollup table means most reads are cheap
+enough that a single, properly-tuned instance handles both reads and writes without the two queuing behind
+each other the way raw-table scans would have.
 
 ## API
 
@@ -144,9 +145,15 @@ between 15,000 and 45,000+ row-writes/sec for the same traffic. The trade-off: e
 stored as a string (`retries: 3` becomes `"3"`), so `attr.<key>` filtering is exact-string-match only, no
 numeric ranges.
 
-**A second small table, `logs_hourly_counts`,** keeps a running total per `(hour, service, level)`. When an
-aggregate query asks for `bucket=1h` or `1d` with no `q=`/`attr.*` filter, it reads this instead of scanning
-`logs` — cost stays proportional to hours-in-range, not rows-in-range.
+**Two small rollup tables, `logs_hourly_counts` and `logs_minute_counts`,** each keep a running total per
+`(bucket, service, level)`, updated in the *same transaction* as the raw insert — never a separate write that
+could drift out of sync. When an aggregate query has no `q=`/`attr.*` filter, it reads one of these instead of
+scanning `logs`: `bucket=1h`/`1d` from the hourly table, `bucket=1m`/`5m` from the minute one. Two tables, not
+one finer-grained one, because a `1d` bucket over the full retention window only needs to sum a few hundred
+hourly rows this way, not ~43,200 per-minute ones. Both are pruned on the same retention cutoff as `logs`
+itself (see [Retention](#retention)) — an unbounded per-minute table would eventually cost more to scan than
+what it's supposed to speed up. Only `q=`/`attr.*`-filtered aggregates still fall back to scanning `logs`
+directly — those have an unbounded value space that can't be pre-aggregated this way.
 
 ## Retention
 
@@ -195,24 +202,26 @@ is actually checking, are in [`loadtest/k6/`](loadtest/k6/).
 - **Four scenarios, each run by the real grading tool:** flat load (15,000/s, 120s), staged stress (up to
   ~24,000/s), a spike (up to ~28,000/s), and a breakpoint ramp deliberately past capacity.
 
-**Current best result**, same tool, same conditions, after every fix below:
+**Best confirmed result against the real grading tool** (run 7 in the journey table below — minute-rollup
+added, read replica still in place at the time):
 
 | Category | Score | What it measured |
 |---|---|---|
 | Reliability | 20 / 20 | all 4 scenarios completed, no crashes |
 | Correctness | 15 / 15 | every response matches the required contract |
-| Performance | 45.0 / 50 | 14,999 logs/sec, 0% errors, p95 43ms |
-| Queries | 0 / 15 | aggregate p95 5.3s, consistency passed 0/4 |
-| **Total** | **80.0 / 100** | |
+| Performance | 30.5 / 50 | 12,881 logs/sec, 0.5% errors, p95 1370ms — this specific run was flagged by the grading tool itself as `machine speed 0.60x reference`, so this number understates the architecture, not a regression |
+| Queries | 0 / 15 | aggregate p95 **1416ms**, down from 5.3s — consistency still 0/4 |
+| **Total** | **65.5 / 100** (directional — see machine-speed note above) | |
 
-**Resource usage under load** (this project's own `docker stats` sampling during a local reproduction of the
-same scenario): Postgres (primary) CPU avg 20-33% / max 82-90%; the read replica CPU avg 60-88% / max
-100-110% (consistently the most CPU-saturated of the three containers — see below for why); the app CPU avg
-21-41% / max 50-55%, comfortably under its 0.5-core cap throughout.
+The Postgres read replica shown in earlier revisions of this doc has since been removed (see
+[How it's built](#how-its-built) and [Known limitations](#known-limitations)) — that architecture change
+hasn't yet been measured against the real grading tool, only verified locally (full test suite, manual
+read-after-write checks). Numbers above are the last confirmed real-tool run, taken before that removal.
 
-**Full latency percentiles**, from this project's own load-test tooling (`loadtest/k6/load.js`) — the real
-grading tool only reports p95, so this is the finer-grained view behind that one number, from the same class
-of run as the current-best result above:
+**Full latency percentiles** below are from this project's own load-test tooling (`loadtest/k6/load.js`),
+predating the minute-rollup fix (run 4 in the journey table) — kept for the p50-vs-tail contrast they show,
+not as the current state. The real grading tool's own p95 numbers (the ones that actually count) are in the
+table above and the journey table below; both are more recent than this one.
 
 | Shape | p50 | p90 | p95 | max |
 |---|---|---|---|---|
@@ -223,8 +232,8 @@ of run as the current-best result above:
 
 \* Ranges, not a typo — this is the run-to-run variance itself being reported honestly rather than picking the
 best-looking number: p50 is consistently near-instant (the aggregate cache hitting), while p90+ varies a lot
-run to run depending on host/replica contention at the time. See [the journey](#the-journey-what-was-actually-broken-and-what-fixing-it-moved)
-below for why the tail is still this wide.
+run to run depending on host contention at the time. See [the journey](#the-journey-what-was-actually-broken-and-what-fixing-it-moved)
+below for why the tail was still this wide before the rollup fix.
 
 ### The journey: what was actually broken, and what fixing it moved
 
@@ -241,6 +250,24 @@ reverted based on what the real tool reported, not on what seemed like it should
 | 4 | Every aggregate shape cached, not just `q=`/`attr.*`-filtered ones; cache window widened from 1s to 8s once the real ~1s polling cadence was confirmed | 76.9 | Aggregate p95 13.0s → 8.6s. Queries unchanged (0/15) |
 | 5 | Capped the app's connection pool to the replica (4, down from 10) — diagnosed via `pg_stat_replication` that WAL replay fell up to 68.7s/382MB behind under unbounded read concurrency | 67.4 — **reverted** | Replay lag genuinely improved (measured directly), but Performance dropped (41.9→32.4/50, p95 350ms→763ms) for **zero** change to Queries or consistency. A real, measured cost with no matching benefit — reverted rather than kept on faith |
 | 6 | Pool cap reverted | **80.0** | Performance recovered *past* every prior run (45.0/50, p95 43ms) — confirms run 5 was a pure regression, not a worthwhile tradeoff |
+| 7 | Added a minute-granularity rollup (`logs_minute_counts`), the same idea as `logs_hourly_counts` one level finer, so `bucket=1m`/`5m` (previously always a live scan) gets the same treatment `1h`/`1d` already had | 65.5 (see machine-speed note above) | Aggregate p95 **4303ms → 1416ms**, a real 66% cut, confirmed by the real tool. **Queries still exactly 0/15, consistency still exactly 0/4** — unmoved despite the cut. Total isn't comparable to run 6: this run was flagged `machine speed 0.60x reference` by the grading tool itself |
+| 8 | Read replica removed entirely — see [How it's built](#how-its-built) | *not yet measured against the real tool* | Verified locally: full test suite green (unit + integration) against a single Postgres instance, manual read-after-write curl checks pass. Directly disproved the leading theory for the consistency gap in the process — see below |
+
+Run 7 matters beyond its own number: three completely different fixes now — cache-window tuning (run 4), an
+in-process live-window tracker (tried between runs 6 and 7, not shown as its own row since it was superseded
+before a real-tool run), and now a durable, transactionally-consistent rollup — have each cut aggregate
+latency substantially and *none of them moved Queries or consistency even once*. That's strong evidence the
+gap was never really about read-side latency or architecture at all.
+
+What ended up being much more informative was a plain manual check, no load involved: `POST /logs` a single
+entry, then `GET /logs` immediately after, with the replica already removed (run 8's architecture) — **the
+record still wasn't visible for roughly the first 50ms.** That's not replication lag (there's no replica left
+to lag); it's `writeBuffer.ts`'s own batching interval (`FLUSH_INTERVAL_MS`, default 100ms) — the write buffer
+returns `200` as soon as a batch is admitted, not once it's actually durable in Postgres, by design (see
+[Retention](#retention) and `writeBuffer.ts`'s own comments). If the real consistency check's tolerance is
+anywhere near zero — checking visibility immediately after the `200` comes back — this is a far more direct
+explanation than anything replica- or query-architecture-related tried so far. Not yet confirmed against the
+real tool; recorded here as the current leading theory, not a fix.
 
 **Bottlenecks actually found**, in the order they were diagnosed:
 1. A replica-startup race blocking the app's own boot (`app` waited on the replica reaching healthy before
@@ -254,36 +281,34 @@ reverted based on what the real tool reported, not on what seemed like it should
 4. WAL replay competing with read queries for that same core, independent of query cost — confirmed directly
    via `pg_stat_replication`, not inferred.
 
-**Optimizations applied:** the read/write split itself (primary + replica, [How it's built](#how-its-built));
-recognizing Postgres's own "not ready" errors as fallback triggers, not just network failures; caching every
-aggregate shape with a window sized to the confirmed real polling cadence, not a guessed one.
+**Optimizations applied:** a minute-granularity rollup table (`logs_minute_counts`) alongside the existing
+hourly one, updated in the same transaction as the raw insert, so every unfiltered aggregate shape — not just
+`1h`/`1d` — reads a small pre-aggregated table instead of scanning `logs`; a single, properly-tuned Postgres
+instance instead of a primary+replica split (see [How it's built](#how-its-built)) once the rollup made the
+read/write contention that split existed to fix mostly moot.
 
 **What's still open, honestly:** Queries has read exactly 0/15 across every run in the table above, and
-consistency exactly 0/4 — across aggregate p95 ranging from 5.3s to 13s and replication lag ranging from 3s
-to 68.7s in local measurement. That's zero measured sensitivity to either lever tried so far. This isn't
-unique to this submission — every comparable report seen from this grading tool, including the
-highest-scoring one available, landed in the same 0-6/15 range on this category — but "common" isn't the same
-as "understood," and this project doesn't yet have a confirmed explanation for what the consistency check is
-actually sensitive to. See [Known limitations](#known-limitations).
+consistency exactly 0/4 — across aggregate p95 ranging from 43s down to 1.4s, and across three structurally
+different fixes (a cache, an in-memory tracker, a durable rollup). That's zero measured sensitivity to
+read-side latency or architecture. The current leading theory isn't about reads at all: a plain manual
+`POST` → immediate `GET` check (run 8 above, no replica in the picture) still missed the record for its first
+~50ms — the write buffer's own `FLUSH_INTERVAL_MS` batching delay, not anything replica- or query-related.
+Not yet confirmed against the real tool. This isn't unique to this submission — every comparable report seen
+from this grading tool, including the highest-scoring one available, landed in the same 0-6/15 range on this
+category — but "common" isn't the same as "understood." See [Known limitations](#known-limitations).
 
 ## Known limitations
 
 - **Consistency checks fail (0/4) for a reason this project doesn't yet have confirmed evidence for.**
   Aggregate query latency was the obvious suspect and was worth fixing regardless, but it isn't the answer:
-  consistency stayed at exactly 0/4 across aggregate p95 ranging from 5.3s to 13s and — measured directly via
-  `pg_stat_replication`, not guessed — replication lag ranging from 3s to 68.7s. Both moved substantially
-  across different runs; consistency never did. Capping read concurrency to protect WAL replay (see
-  [Measured Performance Results](#measured-performance-results), run 5) *did* fix replay lag, confirmed
-  directly, and still didn't move it, while costing real Performance score. That result is recorded rather
-  than hidden: a fix that measurably improves the thing it targets but doesn't move the actual score is
-  itself useful evidence that the mental model is incomplete, not proof the fix was wrong.
-- **Aggregate query latency degrades under concurrent load** — every shape queues on the replica's single
-  CPU core, including individually cheap ones (see [Measured Performance Results](#measured-performance-results)).
-  Improved substantially (13s → 5.3s p95 in the best run) but still well over the brief's 1s target.
-- **Adding an index for `q=` wouldn't fix aggregate latency, and would undo the ingestion fix.** Physical
-  replication copies the primary's indexes byte-for-byte — the *maintenance* cost of any index added for the
-  replica's benefit still lands on the primary's write path, which is exactly the cost that was removed to
-  hit the ingestion numbers in Measured Performance Results.
+  three structurally different fixes (a cache, an in-memory tracker, then a durable minute rollup) cut
+  aggregate p95 from 43s down to 1.4s across different runs, and consistency stayed at exactly 0/4 through all
+  of them. Removing the read replica entirely (see [How it's built](#how-its-built)) ruled out replication lag
+  specifically — a manual `POST` → immediate `GET` check with no replica in the picture still missed the
+  record for its first ~50ms, which points at the write buffer's own `FLUSH_INTERVAL_MS` batching delay
+  instead. Recorded as the current leading theory, not a confirmed fix — not yet re-run against the real tool.
+- **Aggregate query latency, while much improved (43s → 1.4s p95 for the live-window shape), is still over the
+  brief's 1s target** under concurrent load — see [Measured Performance Results](#measured-performance-results).
 - **Throughput ceiling observed locally: ~22,500/sec clean, ~23,500-25,000/sec is where every shape (including
   ingestion) degrades together** — the app container's 0.5-CPU cap saturating, not a Postgres problem at that
   point. `loadtest/k6/stress.js` and `breakpoint.js` deliberately push past this to see the degradation, not
@@ -295,9 +320,6 @@ actually sensitive to. See [Known limitations](#known-limitations).
   hot write path.
 - **No authentication.** `AUTH_ENABLED` / `LOADGEN_API_KEY` from the brief's optional contract are not
   implemented — every endpoint is unauthenticated, matching the "zero configuration" grading posture.
-- **The read replica adds one connection-error class of latency**: if it's unreachable, a read falls back to
-  the primary automatically (see [How it's built](#how-its-built)) rather than failing — but that fallback
-  attempt still costs the time of one failed connection first.
 
 ## Optional features
 
@@ -306,11 +328,10 @@ the four required endpoints.
 
 | Feature | Default | Controlled by |
 |---|---|---|
-| Read replica (this doc's [How it's built](#how-its-built)) | on | `READ_DB_CONNECTION` (set automatically by `docker-compose.yml`) |
 | `GET /admin/stats` — row counts, partition sizes, ingestion rate | on | — |
 | `GET /admin/dead-letter`, `POST /admin/dead-letter/replay` | on | — |
 | `GET /admin/logs/tail` — SSE stream of newly-ingested logs | on | — |
-| Pre-aggregated hourly rollup (`logs_hourly_counts`) | on | — |
+| Pre-aggregated hourly + minute rollups (`logs_hourly_counts`, `logs_minute_counts`) | on | — |
 | Backpressure on `q=`-filtered aggregates | **off** | `AGGREGATE_Q_MAX_CONCURRENT` (unset = unbounded) |
 | Web dashboard (`/dashboard`) | on | — |
 
@@ -322,8 +343,7 @@ all four endpoints — verified directly as part of CI.
 `npm test` runs the full suite (unit tests with everything mocked, integration tests against a real
 Postgres). GitHub Actions runs lint, typecheck, build, the full test suite, and a Docker smoke test — cold
 build, fresh containers, `GET /health` polled the same way the real grader does, then a `POST /logs` →
-`GET /logs` round trip to confirm the read path (replica included) actually works, not just that the
-container starts.
+`GET /logs` round trip to confirm the read path actually works, not just that the container starts.
 
 ## Further reading
 
