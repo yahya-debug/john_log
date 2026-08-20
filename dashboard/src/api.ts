@@ -51,7 +51,7 @@ export async function postJSON<T>(url: string, header?: any, body?: any): Promis
     const response = await json.json();
 
     if (response.error)
-        throw new Error(response)
+        throw new Error(response.error)
 
     return {status: json.status, response: (response as T)};
 }
@@ -71,6 +71,22 @@ export async function getLogs(query: LogsQuery): Promise<LogsResponse> {
     const url = '/logs/' + buildQuery(params, attr);
 
     return await getJSON<LogsResponse>(url);
+}
+
+export async function postLogs(logs: unknown[]): Promise<{
+    status: number;
+    body: IngestResponse | {error: string};
+}> {
+    const response = await postJSON<any>('/logs/',
+        {
+            'Content-Type': 'application/json'
+        }, JSON.stringify({ logs })
+    );
+
+    return {
+        status: response.status,
+        body: response.response,
+    }
 }
 
 export async function getAggregate(query: AggregateQuery): Promise<AggregateResponse> {
@@ -105,18 +121,3 @@ export async function replayDeadLetter(): Promise<ReplayResponse> {
     return (await postJSON<ReplayResponse>('/admin/dead-letter/replay')).response;
 }
 
-export async function postLogs(logs: unknown[]): Promise<{
-    status: number;
-    body: IngestResponse | {error: string};
-}> {
-    const response = await postJSON<any>('/logs/',
-        {
-            'Content-Type': 'application/json'
-        }, JSON.stringify(logs)
-    );
-
-    return {
-        status: response.status,
-        body: response.response,
-    }
-}
