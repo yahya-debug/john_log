@@ -1,4 +1,4 @@
-import type { AggregateResponse, Level, LogsResponse, Stats } from "./types";
+import type { AggregateResponse, DeadLetterRow, IngestResponse, Level, LogsResponse, ReplayResponse, Stats } from "./types";
 
 export type LogsQuery = {
     service?: string;
@@ -39,6 +39,21 @@ export async function getJSON<T>(url: string): Promise<T> {
         throw new Error(data.error);
 
     return data;
+}
+
+export async function postJSON<T>(url: string, header?: any, body?: any): Promise<{status: number; response: T}> {
+    const json = await fetch(url, {
+        method: 'POST',
+        headers: header,
+        body: body,
+    });
+
+    const response = await json.json();
+
+    if (response.error)
+        throw new Error(response)
+
+    return {status: json.status, response: (response as T)};
 }
 
 export async function getLogs(query: LogsQuery): Promise<LogsResponse> {
@@ -82,3 +97,26 @@ export function tailURL(filters: {service?: string, level?: Level}): string {
     return '/admin/logs/tail/' + buildQuery(filters);
 }
 
+export async function getDeadLetters(): Promise<DeadLetterRow[]> {
+    return await getJSON<DeadLetterRow[]>('/admin/dead-letter');
+}
+
+export async function replayDeadLetter(): Promise<ReplayResponse> {
+    return (await postJSON<ReplayResponse>('/admin/dead-letter/replay')).response;
+}
+
+export async function postLogs(logs: unknown[]): Promise<{
+    status: number;
+    body: IngestResponse | {error: string};
+}> {
+    const response = await postJSON<any>('/logs/',
+        {
+            'Content-Type': 'application/json'
+        }, JSON.stringify(logs)
+    );
+
+    return {
+        status: response.status,
+        body: response.response,
+    }
+}
