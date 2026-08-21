@@ -64,6 +64,7 @@ function StatsBody({ stats }: { stats: Stats }) {
     pct: Math.round((count / svcMax) * 100),
   }));
 
+//   Key Performance Indicators — the four tiles on the Stats screen (totals.rows, per_second_1m, database_size_bytes, partitions) are the numbers summarizing store health
   const kpis = [
     { label: "totals.rows", value: fmt(stats.totals.rows), note: "exact · summed from by_level" },
     {
