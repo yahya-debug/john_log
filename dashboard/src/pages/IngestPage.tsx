@@ -137,11 +137,7 @@ export default function IngestPage() {
           />
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <button className="btn btn-primary blueprint" onClick={sendBatch} disabled={sending}>
-            <i className="corner tl" />
-            <i className="corner tr" />
-            <i className="corner bl" />
-            <i className="corner br" />
+          <button className="btn btn-primary" style={{ borderRadius: 6 }} onClick={sendBatch} disabled={sending}>
             {sending ? "Sending…" : "Send batch"}
           </button>
           <button className="btn btn-secondary" onClick={loadBadBatch}>
@@ -191,8 +187,9 @@ export default function IngestPage() {
               style={{
                 margin: 0,
                 padding: 14,
-                background: "var(--color-surface)",
+                background: "#ffffff",
                 border: "1px solid var(--color-divider)",
+                borderRadius: 6,
                 font: `400 12px/1.6 ${mono}`,
                 whiteSpace: "pre-wrap",
                 overflow: "auto",

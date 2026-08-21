@@ -69,27 +69,6 @@ function App() {
         >
           operator dashboard
         </div>
-
-        <div
-          style={{
-            marginLeft: "auto",
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            font: "400 12px/1 ui-monospace, Consolas, monospace",
-            color: "color-mix(in srgb, var(--color-text) 60%, transparent)",
-          }}
-        >
-          <span
-            style={{
-              width: 7,
-              height: 7,
-              background: "var(--color-accent)",
-              animation: "jlpulse 2.2s ease-in-out infinite",
-            }}
-          />
-          <span>{window.location.origin}</span>
-        </div>
       </div>
 
       <div
@@ -106,11 +85,11 @@ function App() {
             onClick={() => setTab(t.id)}
             style={{
               appearance: "none",
-              background: "transparent",
               border: 0,
-              borderBottom: `2px solid ${tab === t.id ? "var(--color-accent)" : "transparent"}`,
-              padding: "8px 16px 12px 0",
-              marginRight: 22,
+              borderRadius: 6,
+              background: tab === t.id ? "var(--color-accent)" : "transparent",
+              padding: "9px 18px",
+              margin: "0 8px 10px 0",
               cursor: "pointer",
               fontFamily: "var(--font-heading)",
               fontWeight: 600,
@@ -118,8 +97,8 @@ function App() {
               letterSpacing: ".01em",
               color:
                 tab === t.id
-                  ? "var(--color-text)"
-                  : "color-mix(in srgb, var(--color-text) 52%, transparent)",
+                  ? "var(--color-bg)"
+                  : "color-mix(in srgb, var(--color-text) 60%, transparent)",
             }}
           >
             {t.label}
