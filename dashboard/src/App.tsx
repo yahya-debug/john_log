@@ -3,6 +3,7 @@ import { Blueprint } from "./components/Blueprint";
 import StatsPage from "./pages/StatsPage";
 import IngestPage from "./pages/IngestPage";
 import AggregatePage from "./pages/AggregatePage";
+import LogsPage from "./pages/LogsPage";
 import type { TabIdentifiers } from "./types"
 
 const TABS: {id: TabIdentifiers; label: string}[] = [
@@ -110,7 +111,7 @@ function App() {
       {tab === "stats" && <div style={{ padding: "28px 34px 60px" }}><StatsPage /></div>}
       {tab === "ingest" && <div style={{ padding: "28px 34px 60px" }}><IngestPage /></div>}
       {tab === "aggregate" && <div style={{ padding: "28px 34px 60px" }}><AggregatePage /></div>}
-      {tab === "logs" && <div style={{ padding: "28px 34px 60px" }}>logs</div>}
+      {tab === "logs" && <div style={{ padding: "28px 34px 60px" }}><LogsPage /></div>}
       {tab === "tail" && <div style={{ padding: "28px 34px 60px" }}>tail</div>}
       {tab === "dead" && <div style={{ padding: "28px 34px 60px" }}>dead letter</div>}
     </div>
