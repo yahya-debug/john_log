@@ -18,17 +18,19 @@ export type AggregateQuery = Omit<LogsQuery, 'limit' | 'cursor'> & {
 }
 
 export function buildQuery(params: Record<string, string | number | undefined>, attr?: Record<string, unknown>): string {
-    let url: string = '?';
+    const parts: string[] = [];
+
+    // encodeURIComponent: escape characters that are not safe, and add them as hex code
 
     for (const param in params)
-        if (params[param] != undefined || (param as string).trim() == '')
-            url += `${param}=${params[param]}`;
+        if (params[param] != undefined)
+            parts.push(`${param}=${encodeURIComponent(params[param]!)}`);
 
     if (attr)
         for (const key in attr)
-            url += `attr.${key}=${attr[key]}`
+            parts.push(`attr.${key}=${encodeURIComponent(String(attr[key]))}`);
 
-    return url == '?' ? '':url;
+    return parts.length ? '?' + parts.join('&') : '';
 }
 
 export async function getJSON<T>(url: string): Promise<T> {
@@ -96,6 +98,7 @@ export async function getAggregate(query: AggregateQuery): Promise<AggregateResp
         since: query.since,
         until: query.until,
         bucket: query.bucket,
+        group_by: query.group_by,
         q: query.q,
 
     }
