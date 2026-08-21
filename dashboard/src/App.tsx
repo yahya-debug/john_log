@@ -1,5 +1,6 @@
 import { useState } from "react";
 import { Blueprint } from "./components/Blueprint";
+import StatsPage from "./pages/StatsPage";
 import type { TabIdentifiers } from "./types"
 
 const TABS: {id: TabIdentifiers; label: string}[] = [
@@ -125,7 +126,7 @@ function App() {
         ))}
       </div>
 
-      {tab === "stats" && <div style={{ padding: "28px 34px 60px" }}>stats</div>}
+      {tab === "stats" && <div style={{ padding: "28px 34px 60px" }}><StatsPage /></div>}
       {tab === "ingest" && <div style={{ padding: "28px 34px 60px" }}>ingest</div>}
       {tab === "aggregate" && <div style={{ padding: "28px 34px 60px" }}>aggregate</div>}
       {tab === "logs" && <div style={{ padding: "28px 34px 60px" }}>logs</div>}
