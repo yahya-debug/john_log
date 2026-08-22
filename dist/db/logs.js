@@ -86,6 +86,36 @@ export async function upsertHourlyCounts(entries, client = db.$client) {
         SET count = logs_hourly_counts.count + excluded.count
     `;
 }
+// Same as upsertHourlyCounts, one level finer — see schema.ts's logsMinuteCounts
+// for why this is a separate table instead of a finer-grained logs_hourly_counts.
+// Always called alongside upsertHourlyCounts, same entries, same transaction —
+// every call site that maintains one rollup maintains both.
+export async function upsertMinuteCounts(entries, client = db.$client) {
+    if (entries.length === 0)
+        return;
+    const n = entries.length;
+    const timestamps = new Array(n);
+    const services = new Array(n);
+    const levels = new Array(n);
+    for (let i = 0; i < n; i++) {
+        const e = entries[i];
+        timestamps[i] = new Date(e.timestamp).toISOString();
+        services[i] = e.service;
+        levels[i] = e.level;
+    }
+    await client `
+        INSERT INTO logs_minute_counts (minute, service, level, count)
+        SELECT date_trunc('minute', t.ts::timestamptz), t.service, t.level, COUNT(*)
+        FROM UNNEST(
+            ${timestamps}::text[],
+            ${services}::text[],
+            ${levels}::text[]
+        ) AS t(ts, service, level)
+        GROUP BY 1, 2, 3
+        ON CONFLICT (minute, service, level) DO UPDATE
+        SET count = logs_minute_counts.count + excluded.count
+    `;
+}
 // Last-resort persistence for a write-buffer flush that failed (src/ingestion/writeBuffer.ts).
 // Raw tagged-template insert, not the drizzle query builder or UNNEST batching — deliberately
 // as simple as possible, and independent of anything more elaborate (rollup upserts, array
@@ -111,7 +141,7 @@ export async function deleteDeadLetter(id) {
     await db.$client `DELETE FROM logs_dead_letter WHERE id = ${id}`;
 }
 export async function queryLogs(whereClause, limit) {
-    return db.$client `
+    return sql `
         SELECT id, timestamp, level, service, message, attributes
         FROM logs
         ${whereClause}
@@ -125,7 +155,7 @@ export async function aggregateLogs(whereClause, bucket_size, group) {
     // whatever the group was, it's always a real column on `logs` — validated upstream
     // (query/validate.ts's isValidGroupBy) to only ever be 'service' or 'level'.
     const groupColumn = group ? sql(group) : sql `NULL`;
-    const rows = await db.$client `
+    const rows = await sql `
         SELECT
             date_bin(${bucket_size}::interval, timestamp, TIMESTAMPTZ '2000-01-01') AS start,
             ${groupColumn} AS "group",
@@ -152,8 +182,8 @@ export async function aggregateFromRollup(filters, bucket, group) {
     //
     // since/until are always present (required by AggQueryPar), so they're inlined
     // straight into the outer template instead of built as separate sql`` fragments —
-    // this query runs concurrently with ingestion in every load scenario (see
-    // loadtest/scenarios.ts), so the fewer Fragment objects (each a Promise
+    // this query runs concurrently with ingestion under sustained load (see
+    // loadtest/k6/lib.js), so the fewer Fragment objects (each a Promise
     // subclass — real allocation cost, not free) built per call, the less GC
     // pressure it adds on top of the write path during exactly the window that's
     // already CPU-starved (see README's Measured performance results). Only
@@ -167,13 +197,44 @@ export async function aggregateFromRollup(filters, bucket, group) {
         ? sql `date_bin('1 day'::interval, hour, TIMESTAMPTZ '2000-01-01')`
         : sql("hour");
     const groupColumn = group ? sql(group) : sql `NULL`;
-    const rows = await db.$client `
+    const rows = await sql `
         SELECT
             ${bucketing} AS start,
             ${groupColumn} AS "group",
             SUM(count)::int AS count
         FROM logs_hourly_counts
         WHERE hour >= ${filters.since.toISOString()} AND hour < ${filters.until.toISOString()}
+            ${filters.service ? sql `AND service = ${filters.service}` : sql ``}
+            ${filters.level ? sql `AND level = ${filters.level}` : sql ``}
+        GROUP BY ${group ? sql `start, "group"` : sql `start`}
+        ORDER BY start
+    `;
+    return rows.map((r) => ({
+        start: new Date(r.start).toISOString(),
+        group: r.group,
+        count: r.count,
+    }));
+}
+// Same idea as aggregateFromRollup, reading logs_minute_counts instead — only valid
+// for bucket='1m'|'5m' with no q=/attr.* filter (see aggregateQuery.ts's routing).
+// Cost scales with minutes-in-range × distinct service/level combinations, not with
+// how many raw rows exist in that range — this is what closes the gap 1m/5m used to
+// have no rollup for at all (see schema.ts's logsMinuteCounts).
+export async function aggregateFromMinuteRollup(filters, bucket, group) {
+    // Same reasoning as aggregateFromRollup's bucketing/groupColumn/Fragment-count
+    // comments above — only date_bin(...) for the coarser 5m case genuinely needs a
+    // real Fragment; 1m is already exactly what the column stores.
+    const bucketing = bucket === "5m"
+        ? sql `date_bin('5 minutes'::interval, minute, TIMESTAMPTZ '2000-01-01')`
+        : sql("minute");
+    const groupColumn = group ? sql(group) : sql `NULL`;
+    const rows = await sql `
+        SELECT
+            ${bucketing} AS start,
+            ${groupColumn} AS "group",
+            SUM(count)::int AS count
+        FROM logs_minute_counts
+        WHERE minute >= ${filters.since.toISOString()} AND minute < ${filters.until.toISOString()}
             ${filters.service ? sql `AND service = ${filters.service}` : sql ``}
             ${filters.level ? sql `AND level = ${filters.level}` : sql ``}
         GROUP BY ${group ? sql `start, "group"` : sql `start`}

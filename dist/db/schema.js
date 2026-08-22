@@ -33,6 +33,22 @@ export const logsHourlyCounts = pgTable('logs_hourly_counts', {
     level: text('level').$type().notNull(),
     count: bigint('count', { mode: 'number' }).notNull().default(0),
 }, (table) => [primaryKey({ columns: [table.hour, table.service, table.level] })]);
+// Same idea as logsHourlyCounts, one level finer: bucket=1m|5m (still no attr./q
+// filter) previously had no rollup of their own and always fell back to the live
+// scan over `logs` — the hourly table can't answer them (a hive of hourly counts
+// can't be un-summed back into minutes). This closes that gap the same way the
+// hourly table closed it for 1h/1d, kept as a separate table rather than making
+// logs_hourly_counts finer-grained: a 1d bucket over the full retention window
+// only needs to sum a few hundred hourly rows this way, not ~43,200 per-minute
+// ones. Pruned on the same retention cutoff as logs_hourly_counts (see
+// retention/partitions.ts) — unlike a per-minute table, this one isn't implicitly
+// bounded by anything else, so it needs the same explicit sweep.
+export const logsMinuteCounts = pgTable('logs_minute_counts', {
+    minute: timestamp('minute', { withTimezone: true }).notNull(),
+    service: text('service').notNull(),
+    level: text('level').$type().notNull(),
+    count: bigint('count', { mode: 'number' }).notNull().default(0),
+}, (table) => [primaryKey({ columns: [table.minute, table.service, table.level] })]);
 // Dead-letter storage for write-buffer flush failures (src/ingestion/writeBuffer.ts) —
 // stretch goal, see README's Optional features. Stores the raw entries as-is (jsonb, no
 // schema validation against them) precisely because the point is to never lose a batch

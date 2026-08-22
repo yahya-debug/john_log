@@ -1,6 +1,9 @@
 import { sql } from "drizzle-orm";
 import { db } from "./db.js";
 import { Env } from "../config.js";
+async function execute(query) {
+    return db.execute(query);
+}
 // pg_total_relation_size on the parent returns 0 — partitioned tables hold no
 // storage themselves, everything lives in the child partitions — so size is
 // computed per-partition and summed, not asked of `logs` directly.
@@ -16,9 +19,10 @@ import { Env } from "../config.js";
 // tradeoff monitoring tools make for exactly this reason. totals.rows below
 // stays exact regardless, since it's summed from the by_level/by_service
 // GROUP BYs, which already scan the real data.
+//
 export async function getStats() {
     const [partitionRows, levelRows, serviceRows, rangeRows, rateRows] = await Promise.all([
-        db.execute(sql `
+        execute(sql `
             SELECT
                 c.relname AS name,
                 pg_get_expr(c.relpartbound, c.oid) AS bound,
@@ -31,14 +35,14 @@ export async function getStats() {
             WHERE p.relname = 'logs'
             ORDER BY c.relname
         `),
-        db.execute(sql `SELECT level, count(*)::int AS count FROM logs GROUP BY level`),
-        db.execute(sql `SELECT service, count(*)::int AS count FROM logs GROUP BY service ORDER BY count(*) DESC`),
-        db.execute(sql `SELECT min(timestamp) AS oldest, max(timestamp) AS newest FROM logs`),
+        execute(sql `SELECT level, count(*)::int AS count FROM logs GROUP BY level`),
+        execute(sql `SELECT service, count(*)::int AS count FROM logs GROUP BY service ORDER BY count(*) DESC`),
+        execute(sql `SELECT min(timestamp) AS oldest, max(timestamp) AS newest FROM logs`),
         // the outer WHERE isn't redundant with the FILTER below even though
         // it's the same bound as last_5m — it's what lets Postgres prune to
         // ~today's partition instead of scanning every partition to compute
         // a FILTER'd aggregate over the whole table
-        db.execute(sql `
+        execute(sql `
             SELECT
                 count(*) FILTER (WHERE timestamp >= now() - interval '1 minute')::int AS last_1m,
                 count(*)::int AS last_5m

@@ -62,10 +62,14 @@ export async function dropOldPartitions(retentionDays) {
             dropped.push(name);
         }
     }
-    // logs_hourly_counts (the GET /logs/aggregate rollup — see src/db/logs.ts) has no
-    // partitioning of its own, so it needs an explicit sweep alongside dropping the
-    // dated partitions above, or it would grow past the retention window forever.
+    // logs_hourly_counts/logs_minute_counts (the GET /logs/aggregate rollups — see
+    // src/db/logs.ts) have no partitioning of their own, so they need an explicit
+    // sweep alongside dropping the dated partitions above, or they'd grow past the
+    // retention window forever. logs_minute_counts especially — at ~30x the row
+    // count of the hourly table for the same window, an unbounded one of these
+    // would eventually cost more to scan than what it's supposed to speed up.
     await db.execute(sql `DELETE FROM logs_hourly_counts WHERE hour < ${cutoff.toISOString()}::timestamptz`);
+    await db.execute(sql `DELETE FROM logs_minute_counts WHERE minute < ${cutoff.toISOString()}::timestamptz`);
     return dropped;
 }
 /**

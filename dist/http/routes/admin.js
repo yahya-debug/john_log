@@ -1,6 +1,6 @@
 import express from "express";
 import { validateBatch, isStale } from "../../ingestion/validate.js";
-import { deleteDeadLetter, insertLogs, listDeadLetters, upsertHourlyCounts } from "../../db/logs.js";
+import { deleteDeadLetter, insertLogs, listDeadLetters, upsertHourlyCounts, upsertMinuteCounts } from "../../db/logs.js";
 import { getStats } from "../../db/stats.js";
 import { backfillPartitionForDate } from "../../retention/partitions.js";
 import { db } from "../../db/db.js";
@@ -28,9 +28,10 @@ router.post('/logs/backfill', async function (req, res) {
         await backfillPartitionForDate(new Date(date));
     if (toInsert.length > 0) {
         await insertLogs(toInsert);
-        // Keeps GET /logs/aggregate's rollup fast-path (src/db/logs.ts) accurate for
+        // Keeps GET /logs/aggregate's rollup fast-paths (src/db/logs.ts) accurate for
         // backfilled historical data too, not just normal ingestion.
         await upsertHourlyCounts(toInsert);
+        await upsertMinuteCounts(toInsert);
     }
     const responseJSON = { accepted: toInsert.length, discarded, rejected };
     res.status(toInsert.length > 0 ? 200 : 400).json(responseJSON);
@@ -44,8 +45,8 @@ router.get('/dead-letter', async function (req, res) {
 // Manual-only replay: retries every currently dead-lettered batch, one transaction per
 // row (see db/logs.ts's deadLetterEntries for why per-row, not one combined batch — a
 // single failure in a combined insert would roll back rows that would've replayed
-// fine). Each row's entries go through the exact same insertLogs+upsertHourlyCounts
-// pair the write buffer's flush() uses, so a successful replay is indistinguishable
+// fine). Each row's entries go through the exact same insertLogs+upsertHourlyCounts+
+// upsertMinuteCounts trio the write buffer's flush() uses, so a successful replay is indistinguishable
 // from normal ingestion. Only removed from logs_dead_letter on success; anything that
 // fails again (same underlying issue, or a new one) stays queued for a later attempt —
 // never called by any scheduled job, same posture as /logs/backfill.
@@ -58,6 +59,7 @@ router.post('/dead-letter/replay', async function (req, res) {
             await db.$client.begin(async (tx) => {
                 await insertLogs(row.entries, tx);
                 await upsertHourlyCounts(row.entries, tx);
+                await upsertMinuteCounts(row.entries, tx);
             });
             await deleteDeadLetter(row.id);
             replayed++;

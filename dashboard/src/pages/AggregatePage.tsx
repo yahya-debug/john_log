@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Panel } from "../components/Blueprint";
 import { getAggregate } from "../api";
 import type { AggregateQuery } from "../api";
@@ -27,19 +27,21 @@ const GROUP_OPTS: { value: GroupBy; label: string }[] = [
 ];
 
 const STEP_MS: Record<Bucket, number> = { "1m": 60000, "5m": 300000, "1h": 3600000, "1d": 86400000 };
-const N: Record<Bucket, number> = { "1m": 60, "5m": 48, "1h": 24, "1d": 14 };
+const DEFAULT_N: Record<Bucket, number> = { "1m": 60, "5m": 48, "1h": 24, "1d": 14 };
+const MAX_BUCKETS = 2000;
 
-function computeRange(bucket: Bucket) {
-  const n = N[bucket];
-  const stepMs = STEP_MS[bucket];
+function defaultRange(bucket: Bucket) {
   const until = new Date();
-  const sinceMs = until.getTime() - n * stepMs;
-  return { since: new Date(sinceMs).toISOString(), until: until.toISOString(), sinceMs, stepMs, n };
+  const since = new Date(until.getTime() - DEFAULT_N[bucket] * STEP_MS[bucket]);
+  return { since: since.toISOString(), until: until.toISOString() };
 }
+
+type LastQuery = { sinceMs: number; stepMs: number; n: number; bucket: Bucket; groupBy: GroupBy; q: string };
 
 type Series = { name: string; color: string; points: string };
 
-function buildSeries(resp: AggregateResponse, groupBy: GroupBy, sinceMs: number, stepMs: number, n: number) {
+function buildSeries(resp: AggregateResponse, lq: LastQuery) {
+  const { groupBy, sinceMs, stepMs, n } = lq;
   let groupNames: string[];
   if (groupBy === "level") {
     groupNames = LEVELS;
@@ -70,7 +72,7 @@ function buildSeries(resp: AggregateResponse, groupBy: GroupBy, sinceMs: number,
     const values = valuesByGroup.get(name)!;
     const color = groupBy === "level" ? levelColor[name as Level] : PALETTE[gi % PALETTE.length];
     const points = values
-      .map((v, i) => `${((i / (n - 1)) * W).toFixed(1)},${(H - (v / max) * (H - 10)).toFixed(1)}`)
+      .map((v, i) => `${(n > 1 ? (i / (n - 1)) * W : 0).toFixed(1)},${(H - (v / max) * (H - 10)).toFixed(1)}`)
       .join(" ");
     return { name, color, points };
   });
@@ -82,40 +84,88 @@ export default function AggregatePage() {
   const [bucket, setBucket] = useState<Bucket>("1h");
   const [groupBy, setGroupBy] = useState<GroupBy>("level");
   const [q, setQ] = useState("");
+
+  const initial = defaultRange("1h");
+  const [sinceInput, setSinceInput] = useState(initial.since);
+  const [untilInput, setUntilInput] = useState(initial.until);
+  const [rangeTouched, setRangeTouched] = useState(false);
+
   const [data, setData] = useState<AggregateResponse | null>(null);
+  const [lastQuery, setLastQuery] = useState<LastQuery | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const range = useMemo(() => computeRange(bucket), [bucket]);
+  // Bucket size implies a sensible default lookback — keep the fields in sync
+  // with that until the user actually types a value of their own.
+  useEffect(() => {
+    if (rangeTouched) return;
+    const r = defaultRange(bucket);
+    setSinceInput(r.since);
+    setUntilInput(r.until);
+  }, [bucket, rangeTouched]);
+
+  const onSinceChange = (v: string) => {
+    setRangeTouched(true);
+    setSinceInput(v);
+  };
+  const onUntilChange = (v: string) => {
+    setRangeTouched(true);
+    setUntilInput(v);
+  };
+  const resetRange = () => {
+    setRangeTouched(false);
+    const r = defaultRange(bucket);
+    setSinceInput(r.since);
+    setUntilInput(r.until);
+  };
 
   const run = async () => {
-    setLoading(true);
     setError(null);
+
+    const since = new Date(sinceInput);
+    const until = new Date(untilInput);
+    if (isNaN(since.getTime())) return setError("invalid since timestamp");
+    if (isNaN(until.getTime())) return setError("invalid until timestamp");
+    if (until.getTime() < since.getTime()) return setError("until must not be before since");
+
+    const stepMs = STEP_MS[bucket];
+    const n = Math.round((until.getTime() - since.getTime()) / stepMs);
+    if (n <= 0) return setError("range must span at least one bucket");
+    if (n > MAX_BUCKETS)
+      return setError(
+        `range too wide for ${bucket} buckets (${fmt(n)} buckets) — pick a coarser bucket or a shorter range`
+      );
+
+    setLoading(true);
     try {
       const resp = await getAggregate({
-        since: range.since,
-        until: range.until,
+        since: since.toISOString(),
+        until: until.toISOString(),
         bucket,
         group_by: groupBy || undefined,
         q: q || undefined,
       });
       setData(resp);
+      setLastQuery({ sinceMs: since.getTime(), stepMs, n, bucket, groupBy, q });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
       setData(null);
+      setLastQuery(null);
     } finally {
       setLoading(false);
     }
   };
 
-  const built = data ? buildSeries(data, groupBy, range.sinceMs, range.stepMs, range.n) : null;
+  const built = data && lastQuery ? buildSeries(data, lastQuery) : null;
   const rollup = (bucket === "1h" || bucket === "1d") && !q;
 
-  const xTicks = Array.from({ length: 6 }, (_, i) => {
-    const idx = Math.round((i * (range.n - 1)) / 5);
-    const d = new Date(range.sinceMs + idx * range.stepMs);
-    return bucket === "1d" ? d.toISOString().slice(5, 10) : d.toISOString().slice(11, 16);
-  });
+  const xTicks =
+    lastQuery &&
+    Array.from({ length: 6 }, (_, i) => {
+      const idx = Math.round((i * (lastQuery.n - 1)) / 5);
+      const d = new Date(lastQuery.sinceMs + idx * lastQuery.stepMs);
+      return lastQuery.bucket === "1d" ? d.toISOString().slice(5, 10) : d.toISOString().slice(11, 16);
+    });
   const gridY = Array.from({ length: 5 }, (_, i) => (i * 300) / 4);
 
   const rows = data ? [...data.buckets].sort((a, b) => a.start.localeCompare(b.start)) : [];
@@ -135,14 +185,29 @@ export default function AggregatePage() {
       </p>
 
       <Panel style={{ padding: "18px 20px", margin: "24px 0 26px", display: "flex", flexWrap: "wrap", alignItems: "flex-end", gap: 22 }}>
-        <div className="field" style={{ width: 210 }}>
+        <div className="field" style={{ width: 230 }}>
           <label>since</label>
-          <input className="input" style={{ fontFamily: mono, fontSize: 12.5 }} value={range.since} readOnly />
+          <input
+            className="input"
+            style={{ fontFamily: mono, fontSize: 12.5 }}
+            value={sinceInput}
+            onChange={(e) => onSinceChange(e.target.value)}
+          />
         </div>
-        <div className="field" style={{ width: 210 }}>
+        <div className="field" style={{ width: 230 }}>
           <label>until</label>
-          <input className="input" style={{ fontFamily: mono, fontSize: 12.5 }} value={range.until} readOnly />
+          <input
+            className="input"
+            style={{ fontFamily: mono, fontSize: 12.5 }}
+            value={untilInput}
+            onChange={(e) => onUntilChange(e.target.value)}
+          />
         </div>
+        {rangeTouched && (
+          <button className="btn btn-ghost" onClick={resetRange} type="button">
+            reset to auto
+          </button>
+        )}
         <div className="field">
           <label>bucket</label>
           <div className="seg">
@@ -189,7 +254,7 @@ export default function AggregatePage() {
         </div>
       </Panel>
 
-      {error && <p style={{ fontSize: 13, color: "var(--color-accent-900)" }}>failed to load: {error}</p>}
+      {error && <p style={{ fontSize: 13, color: "var(--color-accent-900)" }}>{error}</p>}
 
       {!data && !error && (
         <p className="text-muted" style={{ fontSize: 13 }}>
@@ -197,14 +262,14 @@ export default function AggregatePage() {
         </p>
       )}
 
-      {data && built && (
+      {data && built && lastQuery && xTicks && (
         <>
           <Panel style={{ padding: "22px 24px 18px" }}>
             <div style={{ display: "flex", alignItems: "baseline", gap: 14, marginBottom: 4 }}>
               <h5 style={{ margin: 0 }}>buckets[] · count over time</h5>
               <span className="text-muted" style={{ font: `400 11px/1 ${mono}` }}>
-                bucket={bucket} · group_by={groupBy || "null"}
-                {q ? ` · q=${q}` : ""}
+                bucket={lastQuery.bucket} · group_by={lastQuery.groupBy || "null"}
+                {lastQuery.q ? ` · q=${lastQuery.q}` : ""}
               </span>
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 16, margin: "12px 0 16px" }}>

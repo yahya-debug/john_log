@@ -1,6 +1,7 @@
 import { EventEmitter } from "node:events";
-import { deadLetterEntries, insertLogs, upsertHourlyCounts } from "../db/logs.js";
+import { deadLetterEntries, insertLogs, upsertHourlyCounts, upsertMinuteCounts } from "../db/logs.js";
 import { db } from "../db/db.js";
+import { recordAccepted } from "../query/liveAggregate.js";
 // creating event emitter object to emit flushed event once entries are successfully flushed
 // we disabled maximum listeners here by setting it to 0, default = 10
 export const tailEmitter = new EventEmitter();
@@ -89,7 +90,12 @@ async function flush() {
         await db.$client.begin(async (tx) => {
             await insertLogs(tmp, tx);
             await upsertHourlyCounts(tmp, tx);
+            await upsertMinuteCounts(tmp, tx);
         });
+        // Only after the transaction above actually commits — see
+        // liveAggregate.ts's header comment for why that ordering matters
+        // (a dead-lettered batch below must never have been counted here).
+        recordAccepted(tmp);
         tailEmitter.emit("flushed", tmp);
     }
     catch (error) {

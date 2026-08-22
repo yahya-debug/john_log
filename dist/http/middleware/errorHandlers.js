@@ -9,11 +9,17 @@ export function malformedJSON(err, req, res, next) {
     }
     next(err);
 }
-export function errorCatcher(err, req, res, next) {
-    try {
-        next(err);
-    }
-    catch (error) {
-        res.status(400).json({ msg: error.message });
-    }
+// Catch-all, registered last in app.ts's middleware chain: anything that
+// reaches here is an error malformedJSON didn't recognize — a query error,
+// a dropped connection, a replica query cancelled mid-flight (a normal
+// replication event under load, not a bug). Without this, such an error
+// just propagates out of an async route handler and can crash the whole
+// process instead of producing a response. Replaces the old errorCatcher,
+// which wrapped `next(err)` in a try/catch that couldn't actually catch
+// anything from downstream async handlers.
+export function finalErrorHandler(err, req, res, next) {
+    console.error("unhandled error in request pipeline:", err);
+    if (res.headersSent)
+        return next(err); // Express owns the response once headers are sent — must defer, not double-send
+    res.status(500).json({ error: "internal server error" });
 }
