@@ -5,6 +5,7 @@ import IngestPage from "./pages/IngestPage";
 import AggregatePage from "./pages/AggregatePage";
 import LogsPage from "./pages/LogsPage";
 import TailPage from "./pages/TailPage";
+import DeadLetterPage from "./pages/DeadLetterPage";
 import type { TabIdentifiers } from "./types"
 
 const TABS: {id: TabIdentifiers; label: string}[] = [
@@ -114,7 +115,7 @@ function App() {
       {tab === "aggregate" && <div style={{ padding: "28px 34px 60px" }}><AggregatePage /></div>}
       {tab === "logs" && <div style={{ padding: "28px 34px 60px" }}><LogsPage /></div>}
       {tab === "tail" && <div style={{ padding: "28px 34px 60px" }}><TailPage /></div>}
-      {tab === "dead" && <div style={{ padding: "28px 34px 60px" }}>dead letter</div>}
+      {tab === "dead" && <div style={{ padding: "28px 34px 60px" }}><DeadLetterPage /></div>}
     </div>
   );
 }

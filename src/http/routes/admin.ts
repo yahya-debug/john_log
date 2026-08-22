@@ -112,7 +112,7 @@ router.get('/logs/tail', function (req: Request, res: Response) {
         for (const entry of entries) {
             if (service !== undefined && entry.service !== service) continue;
             if (level !== undefined && entry.level !== level) continue;
-            res.write(`data: ${JSON.stringify(entry)}\n\n`);
+            res.write(`data: ${JSON.stringify(entry)}\n\n`); // telling the server sent event protocol that this is a data to be handled with .onmessage
         }
     }
     tailEmitter.on('flushed', onFlushed);
